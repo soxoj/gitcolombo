@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import logging
+import os
 import re
 import subprocess
+import urllib.request
 
 
 DELIMITER = '---------------'
@@ -14,7 +17,38 @@ LOG_NAME_REGEXP = r'^(.+?)\s+(\S+)$'
 GIT_EXTRACT_CMD = "git log --pretty='{}' --all".format(LOG_FORMAT)
 GIT_CLONE_CMD = "git clone {}"
 
+GITHUB_USER_REPOS = 'https://api.github.com/users/{}/repos'
+GITHUB_ORGS_REPOS = 'https://api.github.com/orgs/{}/repos'
+
 # TODO: "system" git accounts marks (e.g. noreply@github.com)
+
+
+def get_github_repos(nickname, only_forks=True):
+    repos_links = set()
+    for url in [GITHUB_ORGS_REPOS, GITHUB_USER_REPOS]:
+        req_url = url.format(nickname)
+        req = urllib.request.Request(req_url)
+        try:
+            response = urllib.request.urlopen(req)
+        except Exception as e:
+            logging.debug(e)
+        else:
+            repos = json.loads((response.read().decode('utf8')))
+            result = [r['html_url'] for r in repos if not only_forks or not r['fork']]
+            repos_links.update(set(result))
+
+    return repos_links
+
+
+def find_all_repos_recursively(path):
+    git_dirs = []
+    for current_dir, dirs, _ in os.walk(path):
+        if current_dir.endswith('.git'):
+            git_dirs.append(current_dir)
+            while dirs:
+                dirs.pop()
+
+    return git_dirs
 
 
 class Commit:
@@ -106,20 +140,28 @@ class GitAnalyst:
     """
         Git analysis
     """
-    def __init__(self, git_dir=None, url=None):
-        git = Git()
-        if url:
-            git.clone(url)
-            git_dir = url.split('/')[-1]
-
-        self.repo_name = git_dir
-        git_info = git.get_tree_info(git_dir)
-        text_commits = filter(lambda x: x, git_info.split('\n'))
-        self.commits = list(map(Commit, text_commits))
+    def __init__(self):
+        self.git = Git()
 
         self.persons = {}
         self.names = {}
         self.emails = {}
+        self.repos = []
+
+    def append(self, source=None):
+        if not source:
+            return
+
+        if not '://' in source:
+            git_dir = source
+        else:
+            self.git.clone(source)
+            git_dir = source.split('/')[-1]
+
+        self.repos.append(git_dir)
+        git_info = self.git.get_tree_info(git_dir)
+        text_commits = filter(lambda x: x, git_info.split('\n'))
+        self.commits = list(map(Commit, text_commits))
 
         self.analyze()
 
@@ -163,7 +205,7 @@ class GitAnalyst:
         return self.sorted_persons
 
     def __str__(self):
-        result = 'Analyze of the git repo "{}"'.format(self.repo_name)
+        result = 'Analyze of the git repo(s) "{}"'.format(', '.join(self.repos))
 
         result += '\nVerbose persons info:\n'
         for name, person in self.sorted_persons:
@@ -188,22 +230,37 @@ def main():
     parser.add_argument('-d', '--dir', help='directory with git project(s)')
     parser.add_argument('-u', '--url', help='url of git repo')
     parser.add_argument('--github', action='store_true', help='try to extract extended info from GitHub')
+    parser.add_argument('--nickname', type=str, help='try to download repos from all platforms by nickname')
+    parser.add_argument('-r', '--recursive', action='store_true', help='recursive directory processing')
     parser.add_argument('--debug', action='store_true', help='print debug information')
+    # TODO: clone repos as bare
+    # TODO: allow forks
 
     args = parser.parse_args()
     log_level = logging.INFO if not args.debug else logging.DEBUG
 
     analyst = None
 
-    if args.dir:
-        analyst = GitAnalyst(git_dir=args.dir)
-    elif args.url:
-        analyst = GitAnalyst(url=args.url)
+    analyst = GitAnalyst()
+    repos = []
+
+    repos.append(args.url)
+    repos.append(args.dir and args.dir.rstrip('/'))
+
+    if args.recursive and args.dir:
+        dirs = find_all_repos_recursively(args.dir)
+        repos += dirs
+
+    if args.nickname:
+        repos += get_github_repos(args.nickname)
+
+    for repo in repos:
+        analyst.append(source=repo)
+
+    if analyst.repos:
+        print(analyst)
     else:
         print('Run me with git repo link or path!')
-
-    if analyst:
-        print(analyst)
 
 
 if __name__ == '__main__':

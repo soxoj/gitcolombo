@@ -15,8 +15,11 @@ OSINT tool to extract info about persons from git repositories: common names, em
         # from any git url
         ./gitcolombo.py -u https://github.com/Kalanchyovskaia16/newlps
 
-        # from directory
+        # from directory, recursively
         ./gitcolombo.py -d ./newlps
+
+        # from all GitHub personal/org repos by nickname
+        ./gitcolombo.py --nickname LubyRuffy
 
 Output:
 
@@ -43,9 +46,9 @@ This way we can use it for OSINT as match of names/emails from git history.
 
 ### TODO
 
-- [ ] Total statistics for repos in a directory
+- [x] Total statistics for repos in a directory
 - [ ] Check different names for every email
-- [ ] GitHub support: clone all repos from account/group
+- [x] GitHub support: clone all repos from account/group
 - [ ] GitHub support: extract links to accounts from commit info
 - [ ] Exclude "system" accounts (e.g. noreply@github.com)
 - [ ] Probabilistic graph links based on same names/emails and Levenshtein distance
