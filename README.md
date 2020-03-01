@@ -30,6 +30,7 @@ Output:
   - other persons that person can be
 
 - emails used for the same name
+- different names for the same person
 - general statistics
 
 ### What's the difference between git author and committer?

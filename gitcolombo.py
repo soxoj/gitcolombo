@@ -202,6 +202,13 @@ class GitAnalyst:
             committer_emails.add(commit.committer_email)
             self.names[commit.committer_name] = committer_emails
 
+        self.same_emails_persons = {}
+        for emails_set in self.names.values():
+            names = [name for name, v in self.names.items() if v == emails_set]
+            key = ','.join(sorted(names))
+            if len(names) > 1 and not key in self.same_emails_persons:
+                self.same_emails_persons[key] = (names, emails_set)
+
         return self.sorted_persons
 
     def __str__(self):
@@ -218,6 +225,9 @@ class GitAnalyst:
 
         if matching_result:
             result += '\nMatching info:\n{}{}'.format(DELIMITER, matching_result)
+
+        for names, emails in self.same_emails_persons.values():
+            result += '\n{} are the same person\n'.format(' and '.join(names))
 
         result += '\nStatistics info:\n{}'.format(DELIMITER)
         result += '\nTotal persons: {}'.format(len(self.persons))
