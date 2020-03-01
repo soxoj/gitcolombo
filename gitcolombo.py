@@ -221,7 +221,7 @@ class GitAnalyst:
         matching_result = ''
         for name, emails in self.names.items():
             if len(emails) > 1:
-                matching_result += '\n{} pretends to own emails:\n\t\t\t{}\n'.format(name, '\n\t\t\t'.join(emails))
+                matching_result += '\n{} is the owner of emails:\n\t\t\t{}\n'.format(name, '\n\t\t\t'.join(emails))
 
         if matching_result:
             result += '\nMatching info:\n{}{}'.format(DELIMITER, matching_result)

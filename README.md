@@ -4,7 +4,7 @@
 
 ### Description
 
-OSINT tool to extract info about persons from git repositories: common names, emails, matches between different (as it may seem) accounts.
+OSINT tool to extract info about persons from git repositories: common names, emails, matches between different (as it may seems) accounts.
 
 ### Using
 
