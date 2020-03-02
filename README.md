@@ -16,10 +16,12 @@ OSINT tool to extract info about persons from git repositories: common names, em
         ./gitcolombo.py -u https://github.com/Kalanchyovskaia16/newlps
 
         # from directory, recursively
-        ./gitcolombo.py -d ./newlps
+        ./gitcolombo.py -d ./newlps -r
 
         # from all GitHub personal/org repos by nickname
         ./gitcolombo.py --nickname LubyRuffy
+
+For batch cloning from Gitlab and Bitbucket group repos you can use [ghorg](https://github.com/gabrie30/ghorg).
 
 Output:
 
@@ -53,4 +55,4 @@ This way we can use it for OSINT as match of names/emails from git history.
 - [ ] GitHub support: extract links to accounts from commit info
 - [ ] Exclude "system" accounts (e.g. noreply@github.com)
 - [ ] Probabilistic graph links based on same names/emails and Levenshtein distance
-- [ ] Other popular git platforms: Gitlab, Stash and also
+- [ ] Other popular git platforms: Gitlab, Bitbucket and also

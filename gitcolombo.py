@@ -12,7 +12,7 @@ DELIMITER = '---------------'
 
 LOG_FORMAT = r'%H;"%an %ae";"%cn %ce"'
 LOG_REGEXP = r'(\w+);"(.*?)";"(.*?)"'
-LOG_NAME_REGEXP = r'^(.+?)\s+(\S+)$'
+LOG_NAME_REGEXP = r'^(.*?)\s+(\S+)$'
 
 GIT_EXTRACT_CMD = "git log --pretty='{}' --all".format(LOG_FORMAT)
 GIT_CLONE_CMD = "git clone {}"
@@ -59,7 +59,7 @@ class Commit:
     def _extract_name_email(log_str_part):
         extracted = re.search(LOG_NAME_REGEXP, log_str_part)
         if not extracted:
-            logging.error('Could not extract info from %s', log_str_part)
+            logging.error('Could not extract name/email from "%s"', log_str_part)
             return ('', '')
 
         return extracted.groups()
@@ -68,7 +68,7 @@ class Commit:
     def __init__(self, log_str):
         extracted = re.search(LOG_REGEXP, log_str)
         if not extracted:
-            logging.error('Could not extract info from %s', log_str)
+            logging.error('Could not commit info from "%s"', log_str)
         else:
             self.hash, self.author, self.committer = extracted.groups()
             self.author_name, self.author_email = Commit._extract_name_email(self.author)
@@ -143,10 +143,12 @@ class GitAnalyst:
     def __init__(self):
         self.git = Git()
 
+        self.commits = []
         self.persons = {}
         self.names = {}
         self.emails = {}
         self.repos = []
+        self.same_emails_persons = {}
 
     def append(self, source=None):
         if not source:
@@ -161,17 +163,18 @@ class GitAnalyst:
         self.repos.append(git_dir)
         git_info = self.git.get_tree_info(git_dir)
         text_commits = filter(lambda x: x, git_info.split('\n'))
-        self.commits = list(map(Commit, text_commits))
+        new_commits = list(map(Commit, text_commits))
+        self.commits += new_commits
 
-        self.analyze()
+        self.analyze(new_commits)
 
     @property
     def sorted_persons(self):
         return sorted(self.persons.items(), key=lambda p: p[1].as_author + p[1].as_committer)
 
-    def analyze(self):
+    def analyze(self, new_commits):
         # save all author and committers as unique persons
-        for commit in self.commits:
+        for commit in new_commits:
             person = self.persons.get(commit.author, Person(commit.author))
             person.name = commit.author_name
             person.email = commit.author_email
@@ -185,7 +188,7 @@ class GitAnalyst:
             self.persons[commit.committer] = person
 
         # make persons graph links based on author/committer mismatch
-        for commit in self.commits:
+        for commit in new_commits:
             if not commit.author_committer_same:
                 self.persons[commit.author].also_known[commit.committer] = self.persons[commit.committer]
                 self.persons[commit.committer].also_known[commit.author] = self.persons[commit.author]
@@ -193,7 +196,7 @@ class GitAnalyst:
         # TODO: probabilistic graph links based on same names/emails and Levenshtein distance
         # just checking same names now
 
-        for commit in self.commits:
+        for commit in new_commits:
             author_emails = self.names.get(commit.author_name, set())
             author_emails.add(commit.author_email)
             self.names[commit.author_name] = author_emails
@@ -202,7 +205,6 @@ class GitAnalyst:
             committer_emails.add(commit.committer_email)
             self.names[commit.committer_name] = committer_emails
 
-        self.same_emails_persons = {}
         for emails_set in self.names.values():
             names = [name for name, v in self.names.items() if v == emails_set]
             key = ','.join(sorted(names))
