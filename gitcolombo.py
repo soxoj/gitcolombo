@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+from threading import Thread
 import urllib.request
 
 
@@ -20,8 +21,9 @@ GIT_CLONE_CMD = "git clone {}"
 GITHUB_USER_REPOS = 'https://api.github.com/users/{}/repos'
 GITHUB_ORGS_REPOS = 'https://api.github.com/orgs/{}/repos'
 
-# TODO: "system" git accounts marks (e.g. noreply@github.com)
-
+SYSTEM_EMAILS = [
+    'noreply@github.com',
+]
 
 def get_github_repos(nickname, only_forks=True):
     repos_links = set()
@@ -109,6 +111,29 @@ class Git:
         res = process.stdout.read().decode()
         return res
 
+    @staticmethod
+    def get_verified_username(repo_url, commit, person):
+        if not repo_url.startswith('https://github.com/'):
+            return
+
+        commit_link = repo_url.rstrip('/') + '/commit/' + commit.hash
+        req = urllib.request.Request(commit_link)
+        try:
+            response = urllib.request.urlopen(req)
+            page_source = response.read()
+
+            # TODO: authored and committed
+            extracted = re.search(r'<a href=".+?commits\?author=(.+?)"', str(page_source))
+            if not extracted:
+                return
+
+            name = extracted.groups(0)[0]
+            person.github_link = name
+            logging.debug(commit_link + '\n' + name)
+
+        except Exception as e:
+            logging.debug(e)
+
 
 class Person:
     """
@@ -121,6 +146,7 @@ class Person:
         self.as_author = 0
         self.as_committer = 0
         self.also_known = {}
+        self.github_link = None
 
     def __str__(self):
         result = "Name:\t\t\t{name}\nEmail:\t\t\t{email}".format(name=self.name, email=self.email)
@@ -128,6 +154,8 @@ class Person:
             result += "\nAppears as author:\t{} times".format(self.as_author)
         if self.as_committer:
             result += "\nAppears as committer:\t{} times".format(self.as_committer)
+        if self.github_link:
+            result += "\nVerified account:\n\t\t\thttps://github.com/{}".format(self.github_link)
         if self.also_known:
             result += '\nAlso appears with:{}'.format(
                 '\n\t\t\t'.join(['']+list(self.also_known.keys()))
@@ -166,25 +194,44 @@ class GitAnalyst:
         new_commits = list(map(Commit, text_commits))
         self.commits += new_commits
 
-        self.analyze(new_commits)
+        self.analyze(new_commits, source)
 
     @property
     def sorted_persons(self):
         return sorted(self.persons.items(), key=lambda p: p[1].as_author + p[1].as_committer)
 
-    def analyze(self, new_commits):
+    def resolve_persons(self):
+        threads = []
+        for _, person in self.persons.items():
+            if person.email in SYSTEM_EMAILS:
+                continue
+            # TODO: optimize
+            thread = Thread(target=self.git.get_verified_username, args=(person.repo_url, person.commit, person))
+            thread.start()
+            threads.append(thread)
+
+        for thread in threads:
+            thread.join()
+
+    def analyze(self, new_commits, repo_url):
         # save all author and committers as unique persons
         for commit in new_commits:
+            # author saving
             person = self.persons.get(commit.author, Person(commit.author))
             person.name = commit.author_name
             person.email = commit.author_email
             person.as_author += 1
+            person.repo_url = repo_url
+            person.commit = commit
             self.persons[commit.author] = person
 
+            # committer saving
             person = self.persons.get(commit.committer, Person(commit.committer))
             person.name = commit.committer_name
             person.email = commit.committer_email
             person.as_committer += 1
+            person.repo_url = repo_url
+            person.commit = commit
             self.persons[commit.committer] = person
 
         # make persons graph links based on author/committer mismatch
@@ -208,7 +255,7 @@ class GitAnalyst:
         for emails_set in self.names.values():
             names = [name for name, v in self.names.items() if v == emails_set]
             key = ','.join(sorted(names))
-            if len(names) > 1 and not key in self.same_emails_persons:
+            if len(names) > 1 and key not in self.same_emails_persons:
                 self.same_emails_persons[key] = (names, emails_set)
 
         return self.sorted_persons
@@ -250,6 +297,7 @@ def main():
 
     args = parser.parse_args()
     log_level = logging.INFO if not args.debug else logging.DEBUG
+    logging.basicConfig(level=log_level, format='-'*40 + '\n%(levelname)s: %(message)s')
 
     analyst = None
 
@@ -268,6 +316,9 @@ def main():
 
     for repo in repos:
         analyst.append(source=repo)
+
+    logging.info('Resolving GitHub usernames, please wait...')
+    analyst.resolve_persons()
 
     if analyst.repos:
         print(analyst)
