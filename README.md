@@ -52,7 +52,8 @@ This way we can use it for OSINT as match of names/emails from git history.
 - [x] Total statistics for repos in a directory
 - [ ] Check different names for every email
 - [x] GitHub support: clone all repos from account/group
-- [ ] GitHub support: extract links to accounts from commit info
+- [ ] GitHub support: api pagination
+- [x] GitHub support: extract links to accounts from commit info
 - [ ] Exclude "system" accounts (e.g. noreply@github.com)
 - [ ] Probabilistic graph links based on same names/emails and Levenshtein distance
 - [ ] Other popular git platforms: Gitlab, Bitbucket and also
