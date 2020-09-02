@@ -35,6 +35,10 @@ Output:
 - different names for the same person
 - general statistics
 
+### Details
+
+[RUS] https://telegra.ph/Gitcolombo---OSINT-v-GitHub-03-02
+
 ### What's the difference between git author and committer?
 
 TL;DR
