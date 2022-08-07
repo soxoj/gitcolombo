@@ -18,17 +18,38 @@ LOG_NAME_REGEXP = r'^(.*?)\s+(\S+)$'
 GIT_EXTRACT_CMD = "git log --pretty='{}' --all".format(LOG_FORMAT)
 GIT_CLONE_CMD = "git clone {}"
 
-GITHUB_USER_REPOS = 'https://api.github.com/users/{}/repos'
-GITHUB_ORGS_REPOS = 'https://api.github.com/orgs/{}/repos'
+GITHUB_USER_STATS = 'https://api.github.com/users/{}'
+GITHUB_USER_REPOS = 'https://api.github.com/users/{}/repos?per_page=100&page={}'
+GITHUB_PER_PAGE_LIMIT = 100
 
 SYSTEM_EMAILS = [
     'noreply@github.com',
 ]
 
-def get_github_repos(nickname, only_forks=True):
+
+def get_public_repos_count(nickname):
+    url = GITHUB_USER_STATS
+    req_url = url.format(nickname)
+    req = urllib.request.Request(req_url)
+    try:
+        response = urllib.request.urlopen(req)
+    except Exception as e:
+        logging.debug(e)
+    else:
+        stats = json.loads((response.read().decode('utf8')))
+        repos_count = stats["public_repos"]
+        if repos_count:
+            return repos_count
+
+
+def get_github_repos(nickname, only_forks=True, repos_count=GITHUB_PER_PAGE_LIMIT):
     repos_links = set()
-    for url in [GITHUB_ORGS_REPOS, GITHUB_USER_REPOS]:
-        req_url = url.format(nickname)
+    if not repos_count:
+        return repos_links
+    url = GITHUB_USER_REPOS
+    last_page = int(repos_count / GITHUB_PER_PAGE_LIMIT) + (repos_count % GITHUB_PER_PAGE_LIMIT > 0)
+    for page_num in range(1, last_page + 1):
+        req_url = url.format(nickname, page_num)
         req = urllib.request.Request(req_url)
         try:
             response = urllib.request.urlopen(req)
@@ -312,7 +333,10 @@ def main():
         repos += dirs
 
     if args.nickname:
-        repos += get_github_repos(args.nickname)
+        repos_count = get_public_repos_count(args.nickname)
+        if repos_count:
+            print('found ', repos_count, ' repos')
+            repos += get_github_repos(args.nickname, repos_count)
 
     for repo in repos:
         analyst.append(source=repo)
