@@ -335,8 +335,8 @@ def main():
     if args.nickname:
         repos_count = get_public_repos_count(args.nickname)
         if repos_count:
-            print('found ', repos_count, ' repos')
-            repos += get_github_repos(args.nickname, repos_count)
+            print('found', repos_count, 'repos')
+            repos += get_github_repos(args.nickname, repos_count=repos_count)
 
     for repo in repos:
         analyst.append(source=repo)
