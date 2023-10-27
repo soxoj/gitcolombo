@@ -1,6 +1,6 @@
 # Gitcolombo
 
-![Logo](https://avatars.mds.yandex.net/get-zen_doc/99101/pub_5d641327027a1500ad1d8cc2_5d6413cdf73d9d00adeba784/scale_600)
+![Logo](https://telegra.ph/file/0730b125282266989e861.png)
 
 ### Description
 
