@@ -1,0 +1,23 @@
+# system / editor
+.DS_Store
+
+# python
+__pycache__/
+*.pyc
+
+# claude code state
+.claude/
+
+# secrets — NEVER commit
+.token
+**/.token
+
+# session artefacts (cloned target repos, tool clones, reference downloads)
+GONZOsint/
+repos/
+email-tools/
+gitrecon/
+ghintel.html
+
+# local service script
+move_repos.py
