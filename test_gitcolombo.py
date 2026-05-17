@@ -311,7 +311,11 @@ class TestSameEmailsPersons(unittest.TestCase):
 
 class TestCollectSources(unittest.TestCase):
     def _args(self, **kw):
-        defaults = dict(url=None, dir=None, recursive=False, nickname=None, github=False, debug=False)
+        defaults = dict(
+            url=None, dir=None, recursive=False, nickname=None,
+            github=False, debug=False, include_forks=False,
+            clone_workers=gc.CLONE_WORKERS, no_color=False,
+        )
         defaults.update(kw)
         return types.SimpleNamespace(**defaults)
 
@@ -450,10 +454,395 @@ class TestEndToEnd(unittest.TestCase):
         analyst = gc.GitAnalyst()
         analyst.append(self.tmp)
         rendered = str(analyst)
-        self.assertIn("Verbose persons info", rendered)
-        self.assertIn("Total persons: 2", rendered)
+        self.assertIn("[ identities ]", rendered)
+        self.assertIn("[ stats ]", rendered)
+        self.assertRegex(rendered, r"persons\s+\.+\s+2")
         self.assertIn("alice@example.com", rendered)
         self.assertIn("bob@example.com", rendered)
+
+
+# ---------- Console styling helpers ----------
+
+class TestStylingHelpers(unittest.TestCase):
+    """Covers _setup_colors / _c / _email_with_tag / _email_brackets / _section.
+
+    Color state is module-level; save and restore it around each test so
+    one test cannot leak ANSI codes into another's assertions.
+    """
+
+    def setUp(self):
+        self._prev = gc._COLOR_ENABLED
+        gc._COLOR_ENABLED = False
+
+    def tearDown(self):
+        gc._COLOR_ENABLED = self._prev
+
+    def test_c_returns_plain_when_colors_disabled(self):
+        # Defensive: even when called with an ANSI code, plain text is emitted
+        # when colors are off — otherwise piping to a file dumps escape codes.
+        self.assertEqual(gc._c(gc.NEON, "hello"), "hello")
+        self.assertNotIn("\033", gc._c(gc.NEON, "hello"))
+
+    def test_c_wraps_with_reset_when_colors_enabled(self):
+        gc._COLOR_ENABLED = True
+        out = gc._c(gc.NEON, "hello")
+        self.assertTrue(out.startswith(gc.NEON))
+        self.assertTrue(out.endswith(gc.RESET))
+        self.assertIn("hello", out)
+
+    def test_setup_colors_force_off_overrides_tty(self):
+        gc._setup_colors(force_off=True)
+        self.assertFalse(gc._COLOR_ENABLED)
+
+    def test_setup_colors_respects_no_color_env(self):
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            gc._setup_colors(force_off=False)
+        self.assertFalse(gc._COLOR_ENABLED)
+
+    def test_setup_colors_off_for_non_tty(self):
+        # Plain stdout (e.g. captured by unittest) is not a TTY → no colors.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            gc._setup_colors(force_off=False)
+        self.assertFalse(gc._COLOR_ENABLED)
+
+    def test_email_with_tag_marks_noreply(self):
+        out = gc._email_with_tag("noreply@github.com")
+        self.assertIn("noreply@github.com", out)
+        self.assertIn("[noreply]", out)
+
+    def test_email_with_tag_skips_normal_email(self):
+        self.assertEqual(gc._email_with_tag("alice@example.com"),
+                         "alice@example.com")
+
+    def test_email_brackets_keeps_tag_outside_angle_brackets(self):
+        # Regression: an earlier version stuck [noreply] INSIDE the <...>
+        # which produced things like `<noreply@github.com [noreply]>`.
+        out = gc._email_brackets("noreply@github.com")
+        self.assertTrue(out.startswith("<"))
+        bracket_close = out.index(">")
+        self.assertLess(bracket_close, out.index("[noreply]"))
+
+    def test_email_brackets_plain_email_has_no_tag(self):
+        self.assertEqual(gc._email_brackets("alice@example.com"),
+                         "<alice@example.com>")
+
+    def test_section_returns_header_with_two_rules(self):
+        block = gc._section("identities")
+        # _section yields: blank, rule, "[ identities ]", rule, blank
+        self.assertEqual(len(block), 5)
+        self.assertIn("[ identities ]", block[2])
+        # The two rule lines on either side of the title are identical.
+        self.assertEqual(block[1], block[3])
+
+
+# ---------- Person.__str__ rendering ----------
+
+class TestPersonRender(unittest.TestCase):
+    def setUp(self):
+        self._prev = gc._COLOR_ENABLED
+        gc._COLOR_ENABLED = False
+
+    def tearDown(self):
+        gc._COLOR_ENABLED = self._prev
+
+    def test_header_uses_arrow_and_brackets(self):
+        p = gc.Person(key="Alice a@x.io", name="Alice", email="a@x.io",
+                      as_author=3)
+        out = str(p)
+        first = out.splitlines()[0]
+        self.assertIn("▶", first)
+        self.assertIn("Alice", first)
+        self.assertIn("<a@x.io>", first)
+
+    def test_counts_use_times_n_notation(self):
+        p = gc.Person(key="A a@x", name="A", email="a@x",
+                      as_author=11, as_committer=7)
+        out = str(p)
+        self.assertIn("×11", out)
+        self.assertIn("×7", out)
+
+    def test_last_row_uses_l_branch(self):
+        # Single row → final branch char `└─`, not `├─`.
+        p = gc.Person(key="A a@x", name="A", email="a@x", as_author=1)
+        rows = [line for line in str(p).splitlines() if "author" in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("└─", rows[0])
+
+    def test_two_rows_use_tee_then_l(self):
+        p = gc.Person(key="A a@x", name="A", email="a@x",
+                      as_author=1, as_committer=1)
+        body = str(p).splitlines()[1:]
+        self.assertIn("├─", body[0])
+        self.assertIn("└─", body[-1])
+
+    def test_noreply_tag_on_alias_email_outside_brackets(self):
+        # Alias whose email is a noreply service address should render
+        # `<noreply@github.com> [noreply]` — tag after the closing `>`.
+        alias = gc.Person(key="b", name="GitHub", email="noreply@github.com")
+        p = gc.Person(key="a", name="Alice", email="a@x.io", as_author=1)
+        p.also_known[alias.key] = alias
+        out = str(p)
+        # The alias row must contain both `>` and `[noreply]` with the tag
+        # appearing after the closing angle bracket.
+        alias_line = next(l for l in out.splitlines() if "GitHub" in l)
+        self.assertLess(alias_line.index(">"), alias_line.index("[noreply]"))
+
+    def test_verified_tag_appears_for_resolved_login(self):
+        p = gc.Person(key="A a@x", name="A", email="a@x", as_author=1,
+                      github_login="alice42")
+        out = str(p)
+        self.assertIn("https://github.com/alice42", out)
+        self.assertIn("[verified]", out)
+
+
+# ---------- GitAnalyst.__str__ rendering ----------
+
+class TestAnalystRender(unittest.TestCase):
+    def setUp(self):
+        self._prev = gc._COLOR_ENABLED
+        gc._COLOR_ENABLED = False
+
+    def tearDown(self):
+        gc._COLOR_ENABLED = self._prev
+
+    def _commit(self, h, a_name, a_email, c_name=None, c_email=None):
+        c_name = c_name or a_name
+        c_email = c_email or a_email
+        line = f'{h};"{a_name} {a_email}";"{c_name} {c_email}"'
+        return gc.Commit.parse(line)
+
+    def _filled(self):
+        analyst = gc.GitAnalyst()
+        analyst.repos = ["/tmp/r1", "/tmp/r2"]
+        analyst.commits = [self._commit("h1", "Alice", "a@x.io"),
+                           self._commit("h2", "Bob", "b@x.io")]
+        analyst._analyze(analyst.commits, "/tmp/r1")
+        return analyst
+
+    def test_section_ordering_stats_first(self):
+        # User-facing requirement: stats above correlation above identities.
+        a = self._filled()
+        # Force a correlation block to exist via shared email set.
+        a._analyze(
+            [self._commit("h3", "Alice", "shared@x.io"),
+             self._commit("h4", "AliceB", "shared@x.io")],
+            "/tmp/r1",
+        )
+        out = str(a)
+        i_stats = out.index("[ stats ]")
+        i_corr = out.index("[ correlation ]")
+        i_idents = out.index("[ identities ]")
+        self.assertLess(i_stats, i_corr)
+        self.assertLess(i_corr, i_idents)
+
+    def test_stats_uses_dot_leaders(self):
+        out = str(self._filled())
+        # `persons ........ N` with dots between label and value.
+        self.assertRegex(out, r"persons\s+\.+\s+\d+")
+        self.assertRegex(out, r"commits\s+\.+\s+\d+")
+        self.assertRegex(out, r"repos\s+\.+\s+\d+")
+
+    def test_targets_listed_as_tree(self):
+        out = str(self._filled())
+        # The last target uses `└─`, earlier ones `├─`.
+        target_lines = [l for l in out.splitlines() if "/tmp/r" in l]
+        self.assertEqual(len(target_lines), 2)
+        self.assertIn("├─", target_lines[0])
+        self.assertIn("└─", target_lines[1])
+
+    def test_correlation_absent_when_no_overlap(self):
+        # Pure disjoint identities → no correlation section.
+        out = str(self._filled())
+        self.assertNotIn("[ correlation ]", out)
+
+    def test_correlation_present_for_shared_name_two_emails(self):
+        analyst = gc.GitAnalyst()
+        analyst.repos = ["/tmp/r"]
+        commits = [
+            self._commit("h1", "Alice", "a1@x.io"),
+            self._commit("h2", "Alice", "a2@x.io"),
+        ]
+        analyst.commits = commits
+        analyst._analyze(commits, "/tmp/r")
+        out = str(analyst)
+        self.assertIn("[ correlation ]", out)
+        # The N→emails summary uses `→` and the count.
+        self.assertRegex(out, r"Alice\s*→\s*2 emails")
+
+    def test_correlation_lists_same_person_clusters(self):
+        analyst = gc.GitAnalyst()
+        analyst.repos = ["/tmp/r"]
+        commits = [
+            self._commit("h1", "Alice", "shared@x.io"),
+            self._commit("h2", "AliceB", "shared@x.io"),
+        ]
+        analyst.commits = commits
+        analyst._analyze(commits, "/tmp/r")
+        out = str(analyst)
+        self.assertIn("same person", out)
+        self.assertIn("Alice", out)
+        self.assertIn("AliceB", out)
+        # The cluster line uses ≡ to join names.
+        self.assertIn("≡", out)
+
+
+# ---------- clone_many parallel cloning ----------
+
+class TestCloneMany(unittest.TestCase):
+    def test_empty_input_returns_empty(self):
+        with mock.patch("gitcolombo.subprocess.run") as run:
+            self.assertEqual(gc.clone_many([], "/tmp/x"), {})
+            run.assert_not_called()
+
+    def _stub_clone_factory(self, dest_dir, *, fail_urls=()):
+        """subprocess.run replacement that creates a fake repo dir on success."""
+        def fake_run(argv, **kw):
+            url = argv[2]
+            target = argv[3]
+            if url in fail_urls:
+                return types.SimpleNamespace(returncode=128, stdout="",
+                                             stderr="boom")
+            os.makedirs(os.path.join(target, ".git"), exist_ok=True)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return fake_run
+
+    def test_returns_url_to_path_mapping_on_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            urls = [
+                "https://github.com/u/a",
+                "https://github.com/u/b",
+                "https://github.com/u/c",
+            ]
+            with mock.patch("gitcolombo.subprocess.run",
+                            side_effect=self._stub_clone_factory(tmp)):
+                results = gc.clone_many(urls, tmp, workers=4)
+            self.assertEqual(set(results.keys()), set(urls))
+            for url, path in results.items():
+                self.assertIsNotNone(path, f"{url} should have a path")
+                self.assertTrue(os.path.isdir(os.path.join(path, ".git")))
+
+    def test_failed_clones_map_to_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            urls = ["https://github.com/u/ok", "https://github.com/u/bad"]
+            fake = self._stub_clone_factory(
+                tmp, fail_urls={"https://github.com/u/bad"},
+            )
+            with mock.patch("gitcolombo.subprocess.run", side_effect=fake):
+                results = gc.clone_many(urls, tmp, workers=2)
+            self.assertIsNotNone(results["https://github.com/u/ok"])
+            self.assertIsNone(results["https://github.com/u/bad"])
+
+    def test_runs_one_subprocess_per_url(self):
+        # Sanity: parallelization must not change the total work performed.
+        with tempfile.TemporaryDirectory() as tmp:
+            urls = [f"https://github.com/u/r{i}" for i in range(5)]
+            with mock.patch("gitcolombo.subprocess.run",
+                            side_effect=self._stub_clone_factory(tmp)) as run:
+                gc.clone_many(urls, tmp, workers=3)
+            # 5 URLs => 5 `git clone` invocations, regardless of worker count.
+            self.assertEqual(run.call_count, 5)
+
+    def test_progress_written_to_stderr_not_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            urls = ["https://github.com/u/a"]
+            import io
+            err = io.StringIO()
+            with mock.patch("gitcolombo.subprocess.run",
+                            side_effect=self._stub_clone_factory(tmp)), \
+                 mock.patch("sys.stderr", err):
+                gc.clone_many(urls, tmp, workers=1)
+            self.assertIn("cloning", err.getvalue())
+            self.assertIn("1/1", err.getvalue())
+
+
+# ---------- GitAnalyst.append with pre-cloned path ----------
+
+class TestAppendClonedPath(unittest.TestCase):
+    def test_cloned_path_bypasses_git_clone(self):
+        # Regression: clone_many pre-clones URLs in parallel and feeds the
+        # local path back into append(); we must not re-clone.
+        with tempfile.TemporaryDirectory() as tmp:
+            analyst = gc.GitAnalyst(repos_dir=tmp)
+            with mock.patch("gitcolombo.git_clone") as clone, \
+                 mock.patch("gitcolombo.git_log", return_value=""):
+                analyst.append("https://github.com/u/r", cloned_path=tmp)
+                clone.assert_not_called()
+            self.assertEqual(analyst.repos, [tmp])
+
+    def test_source_url_preserved_for_login_resolution(self):
+        # When append is called with cloned_path, the original URL is still
+        # passed to _analyze as repo_url so resolve_github_username can use it.
+        with tempfile.TemporaryDirectory() as tmp:
+            analyst = gc.GitAnalyst(repos_dir=tmp)
+            captured = {}
+
+            def fake_analyze(commits, repo_url):
+                captured["repo_url"] = repo_url
+
+            with mock.patch.object(analyst, "_analyze", side_effect=fake_analyze), \
+                 mock.patch("gitcolombo.git_log", return_value=""):
+                analyst.append("https://github.com/u/r", cloned_path=tmp)
+            self.assertEqual(captured["repo_url"], "https://github.com/u/r")
+
+
+# ---------- get_github_repos transparency ----------
+
+class TestGetGithubReposLogging(unittest.TestCase):
+    """The 245→31 confusion was caused by silent fork-skipping and silent
+    page-fetch failures. The function now logs a summary so the user can
+    explain the gap without --debug.
+    """
+
+    def test_logs_listing_summary_with_fork_count(self):
+        page = [
+            {"html_url": "https://github.com/u/keep1", "fork": False},
+            {"html_url": "https://github.com/u/keep2", "fork": False},
+            {"html_url": "https://github.com/u/fork1", "fork": True},
+            {"html_url": "https://github.com/u/fork2", "fork": True},
+            {"html_url": "https://github.com/u/fork3", "fork": True},
+        ]
+        with mock.patch("gitcolombo._http_get_json", return_value=page), \
+             self.assertLogs("gitcolombo", level="INFO") as cm:
+            kept = gc.get_github_repos("u", repos_count=5)
+        joined = "\n".join(cm.output)
+        self.assertIn("5 seen", joined)
+        self.assertIn("3 forks skipped", joined)
+        self.assertEqual(len(kept), 2)
+
+    def test_logs_kept_wording_when_include_forks(self):
+        page = [
+            {"html_url": "https://github.com/u/r1", "fork": False},
+            {"html_url": "https://github.com/u/r2", "fork": True},
+        ]
+        with mock.patch("gitcolombo._http_get_json", return_value=page), \
+             self.assertLogs("gitcolombo", level="INFO") as cm:
+            gc.get_github_repos("u", repos_count=2, include_forks=True)
+        joined = "\n".join(cm.output)
+        self.assertIn("forks kept", joined)
+
+    def test_warns_on_failed_page(self):
+        # _http_get_json returns None when the API call fails (rate limit,
+        # network error, etc.). The user must see this, not have repos
+        # silently disappear.
+        with mock.patch("gitcolombo._http_get_json", return_value=None), \
+             self.assertLogs("gitcolombo", level="WARNING") as cm:
+            gc.get_github_repos("u", repos_count=100)
+        joined = "\n".join(cm.output)
+        self.assertIn("returned no data", joined)
+        self.assertIn("rate limit", joined)
+
+    def test_collect_sources_passes_include_forks_flag(self):
+        args = types.SimpleNamespace(
+            url=None, dir=None, recursive=False, nickname="u",
+            github=False, debug=False, include_forks=True,
+            clone_workers=gc.CLONE_WORKERS, no_color=False,
+        )
+        with mock.patch("gitcolombo.get_public_repos_count", return_value=1), \
+             mock.patch("gitcolombo.get_github_repos") as gh:
+            gh.return_value = set()
+            gc._collect_sources(args)
+            gh.assert_called_once()
+            self.assertTrue(gh.call_args.kwargs["include_forks"])
 
 
 if __name__ == "__main__":
