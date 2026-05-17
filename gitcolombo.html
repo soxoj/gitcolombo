@@ -1,0 +1,1080 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>gitcolombo // github osint</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root {
+    --green: #00ff66;
+    --green-bright: #5cffa1;
+    --green-dim: #00b34a;
+    --green-faint: #003d1a;
+    --red: #ff4d4d;
+    --bg: #000;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); margin: 0; padding: 0; }
+  body {
+    color: var(--green);
+    font-family: 'JetBrains Mono', 'Fira Code', Menlo, Consolas, 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 24px 16px;
+  }
+  ::selection { background: var(--green); color: var(--bg); }
+  a { color: var(--green-bright); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .terminal {
+    max-width: 960px;
+    margin: 0 auto;
+    border: 1px solid var(--green-dim);
+    padding: 24px;
+    box-shadow: 0 0 24px rgba(0, 255, 102, 0.08), inset 0 0 60px rgba(0, 255, 102, 0.02);
+  }
+
+  .banner {
+    white-space: pre;
+    font-size: 11px;
+    line-height: 1.1;
+    color: var(--green);
+    text-shadow: 0 0 6px rgba(0, 255, 102, 0.6);
+    margin: 0 0 6px 0;
+    overflow-x: auto;
+  }
+  .subtitle {
+    color: var(--green-dim);
+    font-size: 12px;
+    margin-bottom: 20px;
+    text-transform: lowercase;
+    letter-spacing: 1px;
+  }
+  .subtitle .blink::after {
+    content: "▮";
+    margin-left: 2px;
+    animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--green-faint);
+    margin-bottom: 20px;
+  }
+  .tab {
+    background: transparent;
+    color: var(--green-dim);
+    border: 1px solid var(--green-faint);
+    border-bottom: none;
+    padding: 10px 18px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-right: -1px;
+    margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--green); border-color: var(--green-dim); }
+  .tab.active {
+    color: var(--green);
+    border-color: var(--green-dim);
+    background: rgba(0, 255, 102, 0.04);
+    text-shadow: 0 0 4px rgba(0, 255, 102, 0.6);
+  }
+
+  label {
+    display: block;
+    font-size: 11px;
+    color: var(--green-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin: 14px 0 4px 0;
+  }
+  label .hint { color: var(--green-faint); text-transform: none; letter-spacing: 0; font-size: 11px; }
+
+  input[type="text"], input[type="number"], input[type="password"] {
+    background: transparent;
+    color: var(--green-bright);
+    border: 1px solid var(--green-dim);
+    padding: 9px 12px;
+    font-family: inherit;
+    font-size: 14px;
+    width: 100%;
+    outline: none;
+    caret-color: var(--green);
+  }
+  input::placeholder { color: var(--green-faint); }
+  input:focus {
+    border-color: var(--green);
+    box-shadow: 0 0 8px rgba(0, 255, 102, 0.25);
+  }
+  input[type="number"] { width: 100px; }
+
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > .col { flex: 1 1 200px; min-width: 0; }
+
+  .checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--green);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 14px;
+    margin-right: 22px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox input { accent-color: var(--green); width: 14px; height: 14px; }
+
+  .actions { margin-top: 22px; display: flex; gap: 10px; flex-wrap: wrap; }
+  button.cmd {
+    background: var(--bg);
+    color: var(--green);
+    border: 1px solid var(--green);
+    padding: 10px 22px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  button.cmd:hover { background: var(--green); color: var(--bg); }
+  button.cmd:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.cmd.danger { border-color: var(--red); color: var(--red); }
+  button.cmd.danger:hover { background: var(--red); color: var(--bg); }
+  button.cmd.ghost { border-color: var(--green-dim); color: var(--green-dim); }
+  button.cmd.ghost:hover { color: var(--green); border-color: var(--green); background: transparent; }
+
+  .status {
+    margin-top: 18px;
+    font-size: 12px;
+    color: var(--green-dim);
+    min-height: 18px;
+    word-break: break-all;
+  }
+  .status::before { content: "> "; color: var(--green); }
+  .status.error { color: var(--red); }
+  .status.error::before { content: "! "; color: var(--red); }
+  .status .spin::after { content: " ▮"; animation: blink 0.8s steps(2) infinite; }
+
+  .meta {
+    color: var(--green-dim);
+    font-size: 11px;
+    margin-top: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .results { margin-top: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left;
+    color: var(--green-bright);
+    border-bottom: 1px solid var(--green-dim);
+    padding: 8px 10px;
+    text-transform: uppercase;
+    font-weight: normal;
+    letter-spacing: 1.5px;
+    font-size: 11px;
+    background: rgba(0, 255, 102, 0.04);
+    position: sticky;
+    top: 0;
+  }
+  td {
+    padding: 8px 10px;
+    border-bottom: 1px dashed var(--green-faint);
+    color: var(--green);
+    word-break: break-all;
+    vertical-align: top;
+  }
+  tr:hover td { background: rgba(0, 255, 102, 0.05); }
+  .table-wrap { max-height: 60vh; overflow-y: auto; border: 1px solid var(--green-faint); }
+  .empty { color: var(--green-dim); padding: 24px; text-align: center; font-style: italic; }
+
+  .badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border: 1px solid var(--green-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--green-dim);
+  }
+  .badge.match { border-color: var(--green); color: var(--green); text-shadow: 0 0 4px rgba(0, 255, 102, 0.6); }
+  .badge.noreply { border-color: var(--green-faint); color: var(--green-faint); }
+
+  .footer {
+    margin-top: 24px;
+    color: var(--green-faint);
+    font-size: 11px;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+  .footer-row {
+    margin-top: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .hidden { display: none !important; }
+
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .topbar .subtitle { margin-bottom: 0; }
+  button.cmd.small { padding: 6px 12px; font-size: 11px; letter-spacing: 1.5px; }
+
+  .modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(2px);
+  }
+  .modal-box {
+    position: relative;
+    background: var(--bg);
+    border: 1px solid var(--green);
+    box-shadow: 0 0 32px rgba(0, 255, 102, 0.25), inset 0 0 60px rgba(0, 255, 102, 0.03);
+    max-width: 720px;
+    width: 100%;
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--green-dim);
+    padding: 12px 18px;
+    color: var(--green);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    text-shadow: 0 0 4px rgba(0, 255, 102, 0.6);
+  }
+  .modal-body {
+    padding: 18px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--green);
+  }
+  .modal-body h3 {
+    margin: 18px 0 6px 0;
+    font-size: 12px;
+    color: var(--green-bright);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    text-shadow: 0 0 4px rgba(0, 255, 102, 0.5);
+  }
+  .modal-body h3:first-child { margin-top: 0; }
+  .modal-body code {
+    background: rgba(0, 255, 102, 0.06);
+    border: 1px solid var(--green-faint);
+    padding: 1px 5px;
+    color: var(--green-bright);
+    font-size: 12px;
+  }
+  .modal-body ul { padding-left: 22px; margin: 6px 0; }
+  .modal-body li { margin-bottom: 4px; }
+  .modal-body .warn {
+    border: 1px solid var(--red);
+    padding: 12px 14px;
+    margin: 18px 0 4px 0;
+    color: var(--red);
+    text-shadow: 0 0 4px rgba(255, 77, 77, 0.4);
+  }
+  .modal-body .warn h3 { color: var(--red); text-shadow: 0 0 4px rgba(255, 77, 77, 0.5); margin-top: 0; }
+  .modal-body .warn code { background: rgba(255, 77, 77, 0.06); border-color: rgba(255, 77, 77, 0.25); color: var(--red); }
+
+  @media (max-width: 600px) {
+    .banner { font-size: 8px; }
+    .terminal { padding: 14px; }
+    .row { flex-direction: column; }
+    .tabs { flex-direction: column; }
+    .tab { margin: 0; border-bottom: 1px solid var(--green-faint); }
+  }
+</style>
+</head>
+<body>
+
+<div class="terminal">
+
+<pre class="banner">
+ ░██████╗░██╗████████╗░█████╗░░█████╗░██╗░░░░░░█████╗░███╗░░░███╗██████╗░░█████╗░
+ ██╔════╝░██║╚══██╔══╝██╔══██╗██╔══██╗██║░░░░░██╔══██╗████╗░████║██╔══██╗██╔══██╗
+ ██║░░██╗░██║░░░██║░░░██║░░╚═╝██║░░██║██║░░░░░██║░░██║██╔████╔██║██████╦╝██║░░██║
+ ██║░░╚██╗██║░░░██║░░░██║░░██╗██║░░██║██║░░░░░██║░░██║██║╚██╔╝██║██╔══██╗██║░░██║
+ ╚██████╔╝██║░░░██║░░░╚█████╔╝╚█████╔╝███████╗╚█████╔╝██║░╚═╝░██║██████╦╝╚█████╔╝
+ ░╚═════╝░╚═╝░░░╚═╝░░░░╚════╝░░╚════╝░╚══════╝░╚════╝░╚═╝░░░░░╚═╝╚═════╝░░╚════╝░
+                          :: github commit osint ::
+</pre>
+<div class="topbar">
+  <div class="subtitle">// extract identities from public github activity <span class="blink"></span></div>
+  <button class="cmd small ghost" id="helpBtn">[ ? HELP ]</button>
+</div>
+
+<div class="tabs">
+  <button class="tab active" data-mode="findEmail">[ A ] Find real email by username</button>
+  <button class="tab" data-mode="extractEmails">[ B ] Extract emails from commits</button>
+</div>
+
+<!-- MODE A -->
+<div class="mode" id="mode-findEmail">
+  <label>Github username</label>
+  <input type="text" id="findUser" placeholder="e.g. torvalds" autocomplete="off" spellcheck="false">
+
+  <div class="row">
+    <div class="col">
+      <label>Max fallback repos</label>
+      <input type="number" id="findMaxRepos" value="10" min="1" max="100">
+    </div>
+  </div>
+</div>
+
+<!-- MODE B -->
+<div class="mode hidden" id="mode-extractEmails">
+  <label>Target <span class="hint">— username, owner/repo, or full github.com URL</span></label>
+  <input type="text" id="extractTarget" placeholder="torvalds   ·   torvalds/linux   ·   https://github.com/torvalds/linux" autocomplete="off" spellcheck="false">
+
+  <div class="row">
+    <div class="col">
+      <label>Max repos <span class="hint">(when target is a user)</span></label>
+      <input type="number" id="extractMaxRepos" value="20" min="1" max="500">
+    </div>
+    <div class="col">
+      <label>Max commit pages per repo <span class="hint">(1 page = 100 commits)</span></label>
+      <input type="number" id="extractMaxPages" value="1" min="1" max="20">
+    </div>
+  </div>
+
+  <label class="checkbox">
+    <input type="checkbox" id="extractSkipForks" checked>
+    Skip forks
+  </label>
+</div>
+
+<!-- SHARED -->
+<label>Github token <span class="hint">(optional, 60→5000 req/hour)</span></label>
+<input type="password" id="token" placeholder="ghp_…" autocomplete="off" spellcheck="false">
+
+<label class="checkbox">
+  <input type="checkbox" id="ignoreNoreply" checked>
+  Ignore service noreply emails <span class="hint" style="text-transform:none;letter-spacing:0;color:var(--green-faint);">(noreply@* , @users.noreply.github.com, …)</span>
+</label>
+
+<div class="actions">
+  <button class="cmd" id="runBtn">▶ Run</button>
+  <button class="cmd danger hidden" id="stopBtn">■ Stop</button>
+  <button class="cmd ghost hidden" id="exportBtn">⇩ Export CSV</button>
+</div>
+
+<div class="status" id="status"></div>
+<div class="meta" id="meta"></div>
+
+<div class="results">
+  <div class="table-wrap hidden" id="tableWrap">
+    <table id="results">
+      <thead id="resultsHead"></thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="footer-row">
+  <button class="cmd small ghost" id="moreBtn">[ ? need more results? ]</button>
+  <div class="footer">github.com/Soxoj/gitcolombo // standalone</div>
+</div>
+
+</div>
+
+<!-- MORE RESULTS MODAL -->
+<div class="modal hidden" id="moreModal" role="dialog" aria-modal="true" aria-labelledby="moreTitle">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="moreTitle">// need more results?</span>
+      <button class="cmd small ghost" data-close>[ X ]</button>
+    </div>
+    <div class="modal-body">
+      <ul style="padding-left: 20px; margin: 0;">
+        <li style="margin-bottom: 10px;">
+          <a href="https://github.com/Soxoj/gitcolombo" target="_blank" rel="noopener">gitcolombo CLI</a>
+          — command-line version of this tool
+        </li>
+        <li>
+          <a href="https://github.com/mxrch/GitFive" target="_blank" rel="noopener">GitFive</a>
+          — the most capable email-discovery tool, uses many different methods
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- HELP MODAL -->
+<div class="modal hidden" id="helpModal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="helpTitle">// methodology</span>
+      <button class="cmd small ghost" id="helpClose" data-close>[ X ]</button>
+    </div>
+    <div class="modal-body">
+
+      <h3>[ A ] Find real email by username</h3>
+      <p>Combines several sources, strongest signal first.</p>
+      <ol>
+        <li><code>GET /users/{u}</code> — fetch profile (display name used for ranking)</li>
+        <li><code>GET /users/{u}/gpg_keys</code> — user-uploaded PGP keys.
+            Each UID exposes <code>{email, verified}</code>. This is the strongest
+            signal: the user uploaded the key themselves, and <code>verified: true</code>
+            means GitHub confirmed the mailbox. Marked with the <span class="badge match">gpg verified</span> badge.</li>
+        <li><code>GET /users/{u}/events/public?per_page=100</code><br>
+            → iterate <code>PushEvent.payload.commits[].author.{email, name}</code><br>
+            → covers roughly the last 90 days of public activity</li>
+        <li>If <code>/events</code> returned nothing useful, fall back to:
+          <ul>
+            <li><code>GET /users/{u}/repos?sort=updated</code> — list non-fork repos</li>
+            <li><code>GET /repos/{owner}/{repo}/commits?author={u}</code> — commits attributed to this account</li>
+          </ul>
+        </li>
+        <li>Rank: gpg-verified → gpg-uploaded → name match against profile → commit count</li>
+      </ol>
+
+      <h3>[ B ] Extract emails from commits</h3>
+      <p>Walks every commit reachable from a target (a user or a single repo) and
+      collects author + committer identities.</p>
+      <ol>
+        <li>Resolve target — username OR <code>owner/repo</code></li>
+        <li>List repos via <code>GET /users/{u}/repos?per_page=100&page={n}</code> (paginated, forks optionally skipped)</li>
+        <li>For each repo: <code>GET /repos/{owner}/{repo}/commits?per_page=100&page={n}</code></li>
+        <li>For each commit collect:
+          <ul>
+            <li><code>commit.author.{email, name}</code> + top-level <code>author.login</code></li>
+            <li><code>commit.committer.{email, name}</code> + top-level <code>committer.login</code></li>
+          </ul>
+        </li>
+        <li>Dedupe by lowercased email; aggregate counts and source repos</li>
+      </ol>
+
+      <h3>Commit-message trailer extraction</h3>
+      <p>For every commit body we also parse well-known git trailers and treat
+      each match as a separate identity:</p>
+      <ul>
+        <li><code>Signed-off-by:</code> — DCO sign-off (Linux kernel, Docker, k8s, many enterprise projects)</li>
+        <li><code>Co-authored-by:</code> — GitHub's co-authorship trailer (squash-merged PRs)</li>
+        <li><code>Reviewed-by:</code>, <code>Tested-by:</code>, <code>Acked-by:</code>, <code>Reported-by:</code>, <code>Suggested-by:</code>, <code>Cc:</code> — patch-review chains</li>
+      </ul>
+      <p>Trailer emails are highly intentional — they are added by tooling
+      (<code>git commit -s</code>, the GitHub UI, kernel-style patch review) and
+      typically point to real mailboxes of the people who reviewed, co-authored,
+      or signed off on the commit. They are merged into the results table by
+      email, so a single row may have come from author, committer and several
+      trailer lines at once.</p>
+
+      <h3>Service-noreply filter</h3>
+      <p>When the checkbox is on, addresses that are obviously machine-generated
+      vendor noreplies are dropped before being recorded:</p>
+      <ul>
+        <li><code>noreply@*</code> / <code>no-reply@*</code> / <code>donotreply@*</code> from any domain
+            (e.g. <code>noreply@github.com</code>, <code>noreply@anthropic.com</code> from
+            Claude-Code co-author lines, vendor CI bots, etc.)</li>
+        <li><code>{id}+{login}@users.noreply.github.com</code> — generated when a user
+            enables "Keep my email address private"</li>
+      </ul>
+
+      <div class="warn">
+        <h3>! Warning — commit emails can be forged</h3>
+        <p>Git records whatever <code>user.email</code> / <code>user.name</code> is set
+        locally; GitHub does not verify these for unsigned commits. Anyone can push a
+        commit claiming to be authored by <code>torvalds@kernel.org</code> with the
+        name "Linus Torvalds".</p>
+        <ul>
+          <li>The <strong>Github login</strong> column shows the account GitHub
+              actually resolved the commit email to — that is the only verified signal.</li>
+          <li>The <code>match</code> badge in mode A only means the commit author name
+              equals the public profile name — still circumstantial.</li>
+          <li>A commit's <code>verified</code> status (GPG/SSH/S/MIME signature) is the
+              proper trust check; this tool does not currently filter on it.</li>
+          <li>The system-email filter only hides synthetic addresses; it does not
+              validate anything.</li>
+        </ul>
+        <p style="margin-bottom:0;"><strong>TL;DR:</strong> anything in a commit field
+        is user-controllable. Treat results as <em>leads</em>, always cross-reference
+        before claiming attribution.</p>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const GH = "https://api.github.com";
+// Service noreply addresses: any vendor's `noreply@*` (github, anthropic, gitlab, …)
+// plus GitHub's user-private `{id}+{login}@users.noreply.github.com` pattern.
+const NOREPLY_RE = /(^(?:noreply|no-reply|donotreply|do-not-reply)@|@users\.noreply\.github\.com$)/i;
+// Well-known git trailers — emails inside these lines are intentional
+// identity disclosures (DCO sign-off, GitHub co-authorship, patch reviews).
+const TRAILER_RE = /^(Signed-off-by|Co-authored-by|Reviewed-by|Tested-by|Reported-by|Acked-by|Suggested-by|Cc):\s+([^<]+?)\s+<([^>]+)>\s*$/gim;
+
+function parseTrailers(message) {
+  if (!message) return [];
+  const out = [];
+  TRAILER_RE.lastIndex = 0;  // /g regex is stateful
+  let m;
+  while ((m = TRAILER_RE.exec(message)) !== null) {
+    const name = (m[2] || "").trim();
+    // reject malformed names: ':' implies another trailer label crammed
+    // on the same line; '@' implies a @-mention or stray handle.
+    if (name.includes(":") || name.includes("@")) continue;
+    out.push({
+      key: m[1].toLowerCase(),
+      name,
+      email: (m[3] || "").trim(),
+    });
+  }
+  return out;
+}
+
+const $ = (id) => document.getElementById(id);
+const tabs = document.querySelectorAll(".tab");
+const status = $("status");
+const meta = $("meta");
+const tableWrap = $("tableWrap");
+const tHead = $("resultsHead");
+const tBody = $("resultsBody");
+
+let currentMode = "findEmail";
+let stopFlag = false;
+let running = false;
+let lastRows = [];
+let lastHeaders = [];
+
+// ---------- tabs ----------
+
+tabs.forEach((t) => {
+  t.addEventListener("click", () => {
+    if (running) return;
+    tabs.forEach((x) => x.classList.remove("active"));
+    t.classList.add("active");
+    currentMode = t.dataset.mode;
+    document.querySelectorAll(".mode").forEach((m) => m.classList.add("hidden"));
+    $("mode-" + currentMode).classList.remove("hidden");
+    clearResults();
+  });
+});
+
+// ---------- helpers ----------
+
+function setStatus(text, opts = {}) {
+  status.textContent = text;
+  status.classList.toggle("error", !!opts.error);
+  status.querySelectorAll(".spin").forEach((s) => s.remove());
+  if (opts.spin) {
+    const s = document.createElement("span");
+    s.className = "spin";
+    status.appendChild(s);
+  }
+}
+
+function setMeta(text) { meta.textContent = text || ""; }
+
+function clearResults() {
+  lastRows = [];
+  tBody.innerHTML = "";
+  tHead.innerHTML = "";
+  tableWrap.classList.add("hidden");
+  $("exportBtn").classList.add("hidden");
+  setStatus("");
+  setMeta("");
+}
+
+function getHeaders() {
+  const token = $("token").value.trim();
+  const h = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (token) h["Authorization"] = `Bearer ${token}`;
+  return h;
+}
+
+function ignoreNoreply() { return $("ignoreNoreply").checked; }
+function isNoreply(email) { return NOREPLY_RE.test(email || ""); }
+
+async function ghFetch(path) {
+  if (stopFlag) throw new Error("STOPPED");
+  const url = path.startsWith("http") ? path : GH + path;
+  const resp = await fetch(url, { headers: getHeaders() });
+  if (resp.status === 404) throw new Error("Not found (404)");
+  if (resp.status === 401) throw new Error("Bad credentials (401) — check the token");
+  if (resp.status === 403 || resp.status === 429) {
+    const rem = resp.headers.get("x-ratelimit-remaining");
+    const reset = resp.headers.get("x-ratelimit-reset");
+    const when = reset ? new Date(parseInt(reset, 10) * 1000).toLocaleTimeString() : "?";
+    throw new Error(`Rate limited (remaining=${rem || 0}, resets at ${when}). Add a token to raise the limit.`);
+  }
+  if (!resp.ok) throw new Error(`GitHub API ${resp.status}`);
+  return resp.json();
+}
+
+// ---------- render ----------
+
+function renderTable(headers, rows) {
+  lastRows = rows;
+  lastHeaders = headers;
+  tHead.innerHTML = "<tr>" + headers.map((h) =>
+    `<th${h.width ? ` style="width:${h.width}"` : ""}>${h.label}</th>`
+  ).join("") + "</tr>";
+  tBody.innerHTML = "";
+  if (rows.length === 0) {
+    tBody.innerHTML = `<tr><td colspan="${headers.length}"><div class="empty">no results</div></td></tr>`;
+  } else {
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = headers.map((h) => `<td>${h.render ? h.render(row) : esc(row[h.key])}</td>`).join("");
+      tBody.appendChild(tr);
+    }
+  }
+  tableWrap.classList.remove("hidden");
+  $("exportBtn").classList.toggle("hidden", rows.length === 0);
+}
+
+function esc(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function linkUser(login) {
+  if (!login) return "—";
+  return `<a href="https://github.com/${encodeURIComponent(login)}" target="_blank" rel="noopener">${esc(login)}</a>`;
+}
+
+function linkRepo(full) {
+  if (!full) return "";
+  return `<a href="https://github.com/${full}" target="_blank" rel="noopener">${esc(full)}</a>`;
+}
+
+function renderSources(sources) {
+  if (!sources || !sources.length) return "—";
+  const shown = sources.slice(0, 3).map((s) => linkRepo(s)).join(", ");
+  const extra = sources.length > 3 ? ` <span class="badge">+${sources.length - 3}</span>` : "";
+  return shown + extra;
+}
+
+// ---------- MODE A: find email by username ----------
+
+async function findEmailByUsername(username) {
+  setStatus(`fetching profile @${username}…`, { spin: true });
+  const user = await ghFetch(`/users/${encodeURIComponent(username)}`);
+  const profileName = (user.name || "").toLowerCase().trim();
+  setMeta(`profile: ${user.login}  ·  name: ${user.name || "—"}  ·  public repos: ${user.public_repos}  ·  created: ${(user.created_at || "").slice(0, 10)}`);
+
+  const identities = new Map();
+
+  function record(email, name, source, trailerKey) {
+    if (stopFlag) return;
+    if (!email) return;
+    if (ignoreNoreply() && isNoreply(email)) return;
+    const key = email.toLowerCase();
+    const noreply = isNoreply(email);
+    const matches = profileName && (name || "").toLowerCase().trim() === profileName;
+    const ex = identities.get(key);
+    if (ex) {
+      ex.count++;
+      if (source && !ex.sources.includes(source)) ex.sources.push(source);
+      if (matches) ex.matchesProfile = true;
+      if (name && !ex.names.includes(name)) ex.names.push(name);
+      if (trailerKey) ex.trailers = (ex.trailers || new Set()).add(trailerKey);
+    } else {
+      identities.set(key, {
+        email, name: name || "", names: name ? [name] : [],
+        sources: source ? [source] : [],
+        count: 1, matchesProfile: matches, noreply,
+        trailers: trailerKey ? new Set([trailerKey]) : new Set(),
+      });
+    }
+  }
+
+  function recordTrailers(message, repoFull) {
+    for (const t of parseTrailers(message)) {
+      record(t.email, t.name, repoFull, t.key);
+    }
+  }
+
+  function recordGpg(email, verified, keyId, kind) {
+    if (!email) return;
+    if (ignoreNoreply() && isNoreply(email)) return;
+    const key = email.toLowerCase();
+    const src = "gpg:" + (keyId || "?");
+    const ex = identities.get(key);
+    if (ex) {
+      ex.gpgKey = keyId || ex.gpgKey;
+      ex.gpgVerified = ex.gpgVerified || !!verified;
+      if (!ex.sources.includes(src)) ex.sources.push(src);
+    } else {
+      identities.set(key, {
+        email, name: "", names: [],
+        sources: [src],
+        count: 0, matchesProfile: false,
+        noreply: isNoreply(email),
+        gpgKey: keyId || "", gpgVerified: !!verified, gpgKind: kind,
+      });
+    }
+  }
+
+  // step 0: /users/{u}/gpg_keys — user-uploaded PGP key UIDs (strongest signal)
+  setStatus("checking /users/{u}/gpg_keys…", { spin: true });
+  try {
+    const keys = await ghFetch(`/users/${encodeURIComponent(username)}/gpg_keys`);
+    for (const key of (keys || [])) {
+      if (!key || key.revoked) continue;
+      for (const e of (key.emails || [])) {
+        recordGpg(e.email, e.verified, key.key_id, "primary");
+      }
+      for (const sub of (key.subkeys || [])) {
+        if (!sub || sub.revoked) continue;
+        for (const e of (sub.emails || [])) {
+          recordGpg(e.email, e.verified, sub.key_id, "subkey");
+        }
+      }
+    }
+  } catch (e) {
+    if (e.message === "STOPPED") throw e;
+    // most users have no GPG keys — silent
+  }
+
+  // primary source: /events/public (push events, last ~90 days)
+  setStatus("scanning /events/public…", { spin: true });
+  try {
+    const events = await ghFetch(`/users/${encodeURIComponent(username)}/events/public?per_page=100`);
+    for (const ev of events) {
+      if (ev.type !== "PushEvent") continue;
+      const commits = ev.payload && ev.payload.commits;
+      if (!Array.isArray(commits)) continue;
+      const repoFull = ev.repo && ev.repo.name;
+      for (const c of commits) {
+        record(c.author && c.author.email, c.author && c.author.name, repoFull);
+        recordTrailers(c.message, repoFull);
+      }
+    }
+  } catch (e) {
+    if (e.message === "STOPPED") throw e;
+    setStatus("events lookup failed: " + e.message, { error: true });
+  }
+
+  const havePublicReal = [...identities.values()].some((i) => !i.noreply);
+
+  // fallback: scan commits in user's own non-fork repositories
+  if (!havePublicReal && !stopFlag) {
+    const max = Math.max(1, Math.min(100, parseInt($("findMaxRepos").value, 10) || 10));
+    setStatus(`/events was empty/private — falling back to commits in up to ${max} repos…`, { spin: true });
+    let repos;
+    try {
+      repos = await ghFetch(`/users/${encodeURIComponent(username)}/repos?per_page=100&sort=updated`);
+    } catch (e) {
+      if (e.message === "STOPPED") throw e;
+      throw e;
+    }
+    const nonForks = (repos || []).filter((r) => !r.fork).slice(0, max);
+    for (const repo of nonForks) {
+      if (stopFlag) break;
+      setStatus(`scanning ${repo.full_name}…`, { spin: true });
+      try {
+        const commits = await ghFetch(`/repos/${repo.full_name}/commits?author=${encodeURIComponent(username)}&per_page=100`);
+        for (const c of commits) {
+          const a = c.commit && c.commit.author;
+          const co = c.commit && c.commit.committer;
+          if (a) record(a.email, a.name, repo.full_name);
+          if (co) record(co.email, co.name, repo.full_name);
+          recordTrailers(c.commit && c.commit.message, repo.full_name);
+        }
+      } catch (e) {
+        if (e.message === "STOPPED") throw e;
+        // skip individual repo failures, continue
+      }
+    }
+  }
+
+  // rank: gpg-verified > gpg-uploaded > matches profile > count desc
+  const rows = [...identities.values()].sort((a, b) => {
+    if (!!a.gpgVerified !== !!b.gpgVerified) return a.gpgVerified ? -1 : 1;
+    if (!!a.gpgKey !== !!b.gpgKey) return a.gpgKey ? -1 : 1;
+    if (a.matchesProfile !== b.matchesProfile) return a.matchesProfile ? -1 : 1;
+    return b.count - a.count;
+  });
+
+  renderTable([
+    {
+      label: "Email", key: "email", width: "45%", render: (r) => {
+        let badge = "";
+        if (r.gpgVerified) badge += '<span class="badge match">gpg verified</span> ';
+        else if (r.gpgKey)  badge += '<span class="badge">gpg</span> ';
+        if (r.noreply)      badge += '<span class="badge noreply">noreply</span> ';
+        return badge + esc(r.email);
+      }
+    },
+    { label: "Name(s)", key: "names", width: "27%", render: (r) => esc(r.names.join(" / ") || "—") },
+    { label: "Commits", key: "count", width: "10%" },
+    { label: "Sources", key: "sources", width: "18%", render: (r) => renderSources(r.sources) },
+  ], rows);
+
+  setStatus(stopFlag
+    ? `stopped. ${rows.length} identities collected.`
+    : `done. ${rows.length} identities found.`);
+}
+
+// ---------- MODE B: extract emails from commits ----------
+
+function normalizeTarget(input) {
+  let s = (input || "").trim();
+  s = s.replace(/^git@github\.com:/i, "");
+  s = s.replace(/^https?:\/\//i, "");
+  s = s.replace(/^(www\.)?github\.com\//i, "");
+  s = s.replace(/\.git$/i, "");
+  s = s.replace(/\/+$/, "");
+  s = s.replace(/^\/+/, "");
+  const parts = s.split("/").filter(Boolean);
+  if (parts.length >= 2) return parts[0] + "/" + parts[1];
+  return parts[0] || "";
+}
+
+async function extractEmailsFromCommits(rawTarget) {
+  const target = normalizeTarget(rawTarget);
+  if (!target) throw new Error("could not parse target");
+  const skipForks = $("extractSkipForks").checked;
+  const maxRepos = Math.max(1, Math.min(500, parseInt($("extractMaxRepos").value, 10) || 20));
+  const maxPages = Math.max(1, Math.min(20, parseInt($("extractMaxPages").value, 10) || 1));
+
+  let repos = [];
+  if (target.includes("/")) {
+    setStatus(`fetching repo ${target}…`, { spin: true });
+    const r = await ghFetch(`/repos/${target}`);
+    repos = [r];
+  } else {
+    setStatus(`listing repos for @${target}…`, { spin: true });
+    let page = 1;
+    while (repos.length < maxRepos && !stopFlag) {
+      const chunk = await ghFetch(`/users/${encodeURIComponent(target)}/repos?per_page=100&page=${page}&sort=updated`);
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      for (const r of chunk) {
+        if (skipForks && r.fork) continue;
+        repos.push(r);
+        if (repos.length >= maxRepos) break;
+      }
+      if (chunk.length < 100) break;
+      page++;
+    }
+  }
+
+  setMeta(`repos to scan: ${repos.length}`);
+
+  const identities = new Map();
+  function record(email, name, login, repo, trailerKey) {
+    if (!email) return;
+    if (ignoreNoreply() && isNoreply(email)) return;
+    const key = email.toLowerCase();
+    const ex = identities.get(key);
+    if (ex) {
+      ex.count++;
+      if (login && !ex.logins.includes(login)) ex.logins.push(login);
+      if (name && !ex.names.includes(name)) ex.names.push(name);
+      if (repo && !ex.sources.includes(repo)) ex.sources.push(repo);
+      if (trailerKey) ex.trailers = (ex.trailers || new Set()).add(trailerKey);
+    } else {
+      identities.set(key, {
+        email,
+        names: name ? [name] : [],
+        logins: login ? [login] : [],
+        sources: repo ? [repo] : [],
+        count: 1,
+        noreply: isNoreply(email),
+        trailers: trailerKey ? new Set([trailerKey]) : new Set(),
+      });
+    }
+  }
+
+  function recordTrailers(message, repo) {
+    for (const t of parseTrailers(message)) {
+      record(t.email, t.name, null, repo, t.key);
+    }
+  }
+
+  let totalCommits = 0;
+  for (const repo of repos) {
+    if (stopFlag) break;
+    for (let page = 1; page <= maxPages; page++) {
+      if (stopFlag) break;
+      setStatus(`scanning ${repo.full_name} (page ${page}/${maxPages})…`, { spin: true });
+      try {
+        const commits = await ghFetch(`/repos/${repo.full_name}/commits?per_page=100&page=${page}`);
+        if (!Array.isArray(commits) || commits.length === 0) break;
+        totalCommits += commits.length;
+        for (const c of commits) {
+          const a = c.commit && c.commit.author;
+          const co = c.commit && c.commit.committer;
+          const aLogin = c.author && c.author.login;
+          const coLogin = c.committer && c.committer.login;
+          if (a) record(a.email, a.name, aLogin, repo.full_name);
+          if (co) record(co.email, co.name, coLogin, repo.full_name);
+          recordTrailers(c.commit && c.commit.message, repo.full_name);
+        }
+        renderProgressive(identities);
+        setMeta(`repos scanned: ≤${repos.length}  ·  commits seen: ${totalCommits}  ·  unique emails: ${identities.size}`);
+        if (commits.length < 100) break;
+      } catch (e) {
+        if (e.message === "STOPPED") throw e;
+        break;
+      }
+    }
+  }
+
+  const rows = [...identities.values()].sort((a, b) => b.count - a.count);
+  renderTable([
+    {
+      label: "Email", key: "email", width: "30%", render: (r) => {
+        const badge = r.noreply ? '<span class="badge noreply">noreply</span> ' : "";
+        return badge + esc(r.email);
+      }
+    },
+    { label: "Name(s)", key: "names", width: "18%", render: (r) => esc(r.names.join(" / ") || "—") },
+    { label: "Github login(s)", key: "logins", width: "18%", render: (r) => r.logins.length ? r.logins.map(linkUser).join(", ") : "—" },
+    { label: "Commits", key: "count", width: "8%" },
+    { label: "Repos", key: "sources", width: "26%", render: (r) => renderSources(r.sources) },
+  ], rows);
+
+  setStatus(stopFlag
+    ? `stopped. ${rows.length} unique emails collected from ${totalCommits} commits.`
+    : `done. ${rows.length} unique emails from ${totalCommits} commits across ${repos.length} repos.`);
+}
+
+function renderProgressive(identities) {
+  // light-touch live updates without re-rendering the full table on every commit
+  if (!tableWrap.classList.contains("hidden")) return;
+  if (identities.size === 0) return;
+  const rows = [...identities.values()].slice(0, 50);
+  renderTable([
+    { label: "Email", key: "email", width: "30%" },
+    { label: "Name(s)", key: "names", width: "18%", render: (r) => esc(r.names.join(" / ") || "—") },
+    { label: "Github login(s)", key: "logins", width: "18%", render: (r) => r.logins.length ? r.logins.map(linkUser).join(", ") : "—" },
+    { label: "Commits", key: "count", width: "8%" },
+    { label: "Repos", key: "sources", width: "26%", render: (r) => renderSources(r.sources) },
+  ], rows);
+}
+
+// ---------- run / stop ----------
+
+async function run() {
+  if (running) return;
+  clearResults();
+  stopFlag = false;
+  running = true;
+  $("runBtn").disabled = true;
+  $("stopBtn").classList.remove("hidden");
+
+  try {
+    if (currentMode === "findEmail") {
+      const u = $("findUser").value.trim();
+      if (!u) { setStatus("enter a github username", { error: true }); return; }
+      await findEmailByUsername(u);
+    } else {
+      const t = $("extractTarget").value.trim();
+      if (!t) { setStatus("enter a target (username or owner/repo)", { error: true }); return; }
+      await extractEmailsFromCommits(t);
+    }
+  } catch (e) {
+    if (e.message === "STOPPED") {
+      setStatus("stopped by user.");
+    } else {
+      setStatus("error: " + e.message, { error: true });
+    }
+  } finally {
+    running = false;
+    $("runBtn").disabled = false;
+    $("stopBtn").classList.add("hidden");
+  }
+}
+
+$("runBtn").addEventListener("click", run);
+$("stopBtn").addEventListener("click", () => { stopFlag = true; });
+
+// ---------- help modal ----------
+
+function bindModal(modalId, openBtnId) {
+  const modal = $(modalId);
+  const open  = () => modal.classList.remove("hidden");
+  const close = () => modal.classList.add("hidden");
+  $(openBtnId).addEventListener("click", open);
+  modal.addEventListener("click", (e) => {
+    if (e.target.hasAttribute("data-close")) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !modal.classList.contains("hidden")) close();
+  });
+}
+bindModal("helpModal", "helpBtn");
+bindModal("moreModal", "moreBtn");
+
+// run on Enter inside the active mode's text inputs
+document.querySelectorAll('input[type="text"], input[type="password"]').forEach((el) => {
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); run(); }
+  });
+});
+
+// ---------- CSV export ----------
+
+$("exportBtn").addEventListener("click", () => {
+  if (!lastRows.length) return;
+  const cols = lastHeaders.filter((h) => h.key && h.key !== "_");
+  const csv = [cols.map((c) => c.label).join(",")];
+  for (const r of lastRows) {
+    csv.push(cols.map((c) => {
+      const v = r[c.key];
+      const s = Array.isArray(v) ? v.join(" | ") : (v == null ? "" : String(v));
+      return `"${s.replace(/"/g, '""')}"`;
+    }).join(","));
+  }
+  const blob = new Blob([csv.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  a.href = url;
+  a.download = `gitcolombo-${currentMode}-${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
