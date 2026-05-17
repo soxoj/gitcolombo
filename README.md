@@ -21,6 +21,11 @@ OSINT tool to extract info about persons from git repositories: common names, em
         # from all GitHub personal/org repos by nickname
         ./gitcolombo.py --nickname LubyRuffy
 
+        # change where remote repos get cloned (default: ./repos)
+        ./gitcolombo.py -u https://github.com/Kalanchyovskaia16/newlps --repos-dir ./clones
+
+Remote repositories are cloned into `./repos/` by default; override with `--repos-dir`.
+
 For batch cloning from Gitlab and Bitbucket group repos you can use [ghorg](https://github.com/gabrie30/ghorg).
 
 Output:
@@ -34,6 +39,19 @@ Output:
 - emails used for the same name
 - different names for the same person
 - general statistics
+
+### Testing
+
+Stdlib-only test suite (`test_gitcolombo.py`), no third-party dependencies.
+Run from the repo root:
+
+        python3 -m unittest test_gitcolombo -v
+
+The end-to-end test creates a real git repository in a temp directory, so a
+working `git` binary is required (the test is skipped if `git` is missing).
+
+Tests run on every push and pull request via GitHub Actions
+(`.github/workflows/tests.yml`) across Python 3.10–3.13.
 
 ### Details
 

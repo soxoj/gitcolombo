@@ -1,354 +1,442 @@
 #!/usr/bin/env python3
+"""Gitcolombo — OSINT tool: extract account info from git repositories.
+
+Walks one or more git repositories and aggregates per-person stats
+(name, email, author/committer counts, alternate identities) and detects
+identity overlaps via shared emails or shared names. Optionally resolves
+GitHub logins by scraping commit pages.
+"""
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import os
 import re
 import subprocess
-from threading import Thread
+import urllib.error
 import urllib.request
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Iterable
 
 
-DELIMITER = '---------------'
+DELIMITER = "-" * 15
 
-LOG_FORMAT = r'%H;"%an %ae";"%cn %ce"'
-LOG_REGEXP = r'(\w+);"(.*?)";"(.*?)"'
-LOG_NAME_REGEXP = r'^(.*?)\s+(\S+)$'
+# git log --pretty format: hash;"author_name author_email";"committer_name committer_email"
+GIT_LOG_FORMAT = r'%H;"%an %ae";"%cn %ce"'
+GIT_LOG_LINE_RE = re.compile(r'(\w+);"(.*?)";"(.*?)"')
+GIT_NAME_EMAIL_RE = re.compile(r"^(.*?)\s+(\S+)$")
+GITHUB_COMMIT_AUTHOR_RE = re.compile(r'<a href=".+?commits\?author=(.+?)"')
 
-GIT_EXTRACT_CMD = "git log --pretty='{}' --all".format(LOG_FORMAT)
-GIT_CLONE_CMD = "git clone {}"
+GITHUB_USER_URL = "https://api.github.com/users/{nickname}"
+GITHUB_REPOS_URL = (
+    "https://api.github.com/users/{nickname}/repos?per_page={per_page}&page={page}"
+)
+GITHUB_PER_PAGE = 100
 
-GITHUB_USER_STATS = 'https://api.github.com/users/{}'
-GITHUB_USER_REPOS = 'https://api.github.com/users/{}/repos?per_page=100&page={}'
-GITHUB_PER_PAGE_LIMIT = 100
+HTTP_TIMEOUT = 15
+HTTP_USER_AGENT = "gitcolombo/0.2"
+RESOLVE_WORKERS = 8
+DEFAULT_REPOS_DIR = "repos"
 
-SYSTEM_EMAILS = [
-    'noreply@github.com',
-]
+SYSTEM_EMAILS = frozenset({"noreply@github.com"})
+
+logger = logging.getLogger("gitcolombo")
 
 
-def get_public_repos_count(nickname):
-    url = GITHUB_USER_STATS
-    req_url = url.format(nickname)
-    req = urllib.request.Request(req_url)
+# ---------- HTTP helpers ----------
+
+def _http_get(url: str) -> bytes | None:
+    req = urllib.request.Request(url, headers={"User-Agent": HTTP_USER_AGENT})
     try:
-        response = urllib.request.urlopen(req)
-    except Exception as e:
-        logging.debug(e)
-    else:
-        stats = json.loads((response.read().decode('utf8')))
-        repos_count = stats["public_repos"]
-        if repos_count:
-            return repos_count
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return resp.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        logger.debug("GET %s failed: %s", url, exc)
+        return None
 
 
-def get_github_repos(nickname, only_forks=True, repos_count=GITHUB_PER_PAGE_LIMIT):
-    repos_links = set()
-    if not repos_count:
-        return repos_links
-    url = GITHUB_USER_REPOS
-    last_page = int(repos_count / GITHUB_PER_PAGE_LIMIT) + (repos_count % GITHUB_PER_PAGE_LIMIT > 0)
-    for page_num in range(1, last_page + 1):
-        req_url = url.format(nickname, page_num)
-        req = urllib.request.Request(req_url)
-        try:
-            response = urllib.request.urlopen(req)
-        except Exception as e:
-            logging.debug(e)
-        else:
-            repos = json.loads((response.read().decode('utf8')))
-            result = [r['html_url'] for r in repos if not only_forks or not r['fork']]
-            repos_links.update(set(result))
-
-    return repos_links
+def _http_get_json(url: str):
+    payload = _http_get(url)
+    if payload is None:
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.debug("Bad JSON from %s: %s", url, exc)
+        return None
 
 
-def find_all_repos_recursively(path):
-    git_dirs = []
+# ---------- GitHub API ----------
+
+def get_public_repos_count(nickname: str) -> int:
+    data = _http_get_json(GITHUB_USER_URL.format(nickname=nickname))
+    if not data:
+        return 0
+    return int(data.get("public_repos", 0))
+
+
+def get_github_repos(
+    nickname: str, repos_count: int, include_forks: bool = False,
+) -> set[str]:
+    if repos_count <= 0:
+        return set()
+    last_page = (repos_count + GITHUB_PER_PAGE - 1) // GITHUB_PER_PAGE
+    repos: set[str] = set()
+    for page in range(1, last_page + 1):
+        data = _http_get_json(
+            GITHUB_REPOS_URL.format(
+                nickname=nickname, per_page=GITHUB_PER_PAGE, page=page,
+            )
+        )
+        if not data:
+            continue
+        for repo in data:
+            if include_forks or not repo.get("fork"):
+                repos.add(repo["html_url"])
+    return repos
+
+
+def resolve_github_username(repo_url: str, commit_hash: str) -> str | None:
+    """Scrape commit page to find the GitHub login behind an email."""
+    if not repo_url.startswith("https://github.com/"):
+        return None
+    commit_url = f"{repo_url.rstrip('/')}/commit/{commit_hash}"
+    page = _http_get(commit_url)
+    if page is None:
+        return None
+    match = GITHUB_COMMIT_AUTHOR_RE.search(page.decode("utf-8", errors="replace"))
+    return match.group(1) if match else None
+
+
+# ---------- Filesystem helpers ----------
+
+def find_all_repos_recursively(path: str) -> list[str]:
+    """Return repo roots (directories that contain a .git subdir) under path."""
+    repos: list[str] = []
     for current_dir, dirs, _ in os.walk(path):
-        if current_dir.endswith('.git'):
-            git_dirs.append(current_dir)
-            while dirs:
-                dirs.pop()
-
-    return git_dirs
+        if ".git" in dirs:
+            repos.append(current_dir)
+            dirs[:] = [d for d in dirs if d != ".git"]
+    return repos
 
 
+# ---------- Git subprocess ----------
+
+def git_log(repo_dir: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--pretty={GIT_LOG_FORMAT}", "--all"],
+            cwd=repo_dir, check=False, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        logger.error("'git' binary not found")
+        return ""
+    if result.returncode != 0:
+        logger.debug("git log failed in %s: %s", repo_dir, result.stderr.strip())
+    return result.stdout
+
+
+def _clone_target_dir(url: str) -> str:
+    name = url.rstrip("/").split("/")[-1]
+    return name[:-4] if name.endswith(".git") else name
+
+
+def git_clone(url: str, dest_dir: str) -> str | None:
+    """Clone *url* into *dest_dir*/<repo-name>. Returns the cloned path or None."""
+    os.makedirs(dest_dir, exist_ok=True)
+    target = os.path.join(dest_dir, _clone_target_dir(url))
+    try:
+        result = subprocess.run(
+            ["git", "clone", url, target],
+            check=False, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        logger.error("'git' binary not found")
+        return None
+    if result.returncode != 0:
+        logger.debug("git clone failed for %s: %s", url, result.stderr.strip())
+        return None
+    return target
+
+
+# ---------- Data classes ----------
+
+def _split_name_email(raw: str) -> tuple[str, str]:
+    m = GIT_NAME_EMAIL_RE.match(raw)
+    if not m:
+        logger.error("Could not extract name/email from %r", raw)
+        return "", ""
+    return m.group(1), m.group(2)
+
+
+@dataclass
 class Commit:
-    """
-        Extract and store basic commit info
-    """
-    @staticmethod
-    def _extract_name_email(log_str_part):
-        extracted = re.search(LOG_NAME_REGEXP, log_str_part)
-        if not extracted:
-            logging.error('Could not extract name/email from "%s"', log_str_part)
-            return ('', '')
+    hash: str
+    author: str
+    committer: str
+    author_name: str
+    author_email: str
+    committer_name: str
+    committer_email: str
 
-        return extracted.groups()
+    @property
+    def author_committer_same(self) -> bool:
+        return (
+            self.author_name == self.committer_name
+            and self.author_email == self.committer_email
+        )
 
+    @classmethod
+    def parse(cls, line: str) -> "Commit | None":
+        m = GIT_LOG_LINE_RE.search(line)
+        if not m:
+            logger.error("Could not parse commit line %r", line)
+            return None
+        h, author, committer = m.groups()
+        a_name, a_email = _split_name_email(author)
+        c_name, c_email = _split_name_email(committer)
+        return cls(h, author, committer, a_name, a_email, c_name, c_email)
 
-    def __init__(self, log_str):
-        extracted = re.search(LOG_REGEXP, log_str)
-        if not extracted:
-            logging.error('Could not commit info from "%s"', log_str)
-        else:
-            self.hash, self.author, self.committer = extracted.groups()
-            self.author_name, self.author_email = Commit._extract_name_email(self.author)
-            self.committer_name, self.committer_email = Commit._extract_name_email(self.committer)
-
-            self.author_committer_names_same = self.author_name == self.committer_name
-            self.author_committer_emails_same = self.author_email == self.committer_email
-
-            self.author_committer_same = self.author_committer_names_same and self.author_committer_emails_same
-
-
-    def __str__(self):
-        return """Hash: {hash}
-Author name: {author_name}
-Author email: {author_email}
-Committer name: {committer_name}
-Committer email: {committer_email}
-        """.format(
-            hash=self.hash,
-            author_name=self.author_name, author_email=self.author_email,
-            committer_name=self.committer_name, committer_email=self.committer_email,
+    def __str__(self) -> str:
+        return (
+            f"Hash: {self.hash}\n"
+            f"Author name: {self.author_name}\n"
+            f"Author email: {self.author_email}\n"
+            f"Committer name: {self.committer_name}\n"
+            f"Committer email: {self.committer_email}\n"
         )
 
 
-class Git:
-    """
-        Make external git work
-    """
-    @staticmethod
-    def get_tree_info(git_dir):
-        process = subprocess.Popen(GIT_EXTRACT_CMD, cwd=git_dir, shell=True, stdout=subprocess.PIPE)
-        stat = process.stdout.read().decode()
-        return stat
-
-    @staticmethod
-    def clone(link):
-        process = subprocess.Popen(GIT_CLONE_CMD.format(link), shell=True, stdout=subprocess.PIPE)
-        res = process.stdout.read().decode()
-        return res
-
-    @staticmethod
-    def get_verified_username(repo_url, commit, person):
-        if not repo_url.startswith('https://github.com/'):
-            return
-
-        commit_link = repo_url.rstrip('/') + '/commit/' + commit.hash
-        req = urllib.request.Request(commit_link)
-        try:
-            response = urllib.request.urlopen(req)
-            page_source = response.read()
-
-            # TODO: authored and committed
-            extracted = re.search(r'<a href=".+?commits\?author=(.+?)"', str(page_source))
-            if not extracted:
-                return
-
-            name = extracted.groups(0)[0]
-            person.github_link = name
-            logging.debug(commit_link + '\n' + name)
-
-        except Exception as e:
-            logging.debug(e)
-
-
+@dataclass
 class Person:
-    """
-        Basic person info from commit
-    """
-    def __init__(self, desc):
-        self.name = ''
-        self.email = ''
-        self.desc = desc
-        self.as_author = 0
-        self.as_committer = 0
-        self.also_known = {}
-        self.github_link = None
+    key: str
+    name: str = ""
+    email: str = ""
+    as_author: int = 0
+    as_committer: int = 0
+    also_known: dict[str, "Person"] = field(default_factory=dict)
+    github_login: str | None = None
+    repo_url: str | None = None
+    last_commit_hash: str | None = None
 
-    def __str__(self):
-        result = "Name:\t\t\t{name}\nEmail:\t\t\t{email}".format(name=self.name, email=self.email)
+    def __str__(self) -> str:
+        lines = [
+            f"Name:\t\t\t{self.name}",
+            f"Email:\t\t\t{self.email}",
+        ]
         if self.as_author:
-            result += "\nAppears as author:\t{} times".format(self.as_author)
+            lines.append(f"Appears as author:\t{self.as_author} times")
         if self.as_committer:
-            result += "\nAppears as committer:\t{} times".format(self.as_committer)
-        if self.github_link:
-            result += "\nVerified account:\n\t\t\thttps://github.com/{}".format(self.github_link)
-        if self.also_known:
-            result += '\nAlso appears with:{}'.format(
-                '\n\t\t\t'.join(['']+list(self.also_known.keys()))
+            lines.append(f"Appears as committer:\t{self.as_committer} times")
+        if self.github_login:
+            lines.append(
+                f"Verified account:\n\t\t\thttps://github.com/{self.github_login}"
             )
+        if self.also_known:
+            lines.append(
+                "Also appears with:" + "".join(f"\n\t\t\t{k}" for k in self.also_known)
+            )
+        return "\n".join(lines)
 
-        return result
 
+# ---------- Analyst ----------
 
 class GitAnalyst:
-    """
-        Git analysis
-    """
-    def __init__(self):
-        self.git = Git()
+    def __init__(self, repos_dir: str = DEFAULT_REPOS_DIR) -> None:
+        self.repos_dir = repos_dir
+        self.commits: list[Commit] = []
+        self.persons: dict[str, Person] = {}
+        self.name_to_emails: dict[str, set[str]] = defaultdict(set)
+        self.repos: list[str] = []
+        self.same_emails_persons: dict[str, tuple[list[str], set[str]]] = {}
 
-        self.commits = []
-        self.persons = {}
-        self.names = {}
-        self.emails = {}
-        self.repos = []
-        self.same_emails_persons = {}
-
-    def append(self, source=None):
-        if not source:
-            return
-
-        if not '://' in source:
-            git_dir = source
+    def append(self, source: str) -> None:
+        if "://" in source:
+            repo_dir = git_clone(source, self.repos_dir)
+            if repo_dir is None:
+                return
         else:
-            self.git.clone(source)
-            git_dir = source.split('/')[-1]
+            repo_dir = source
 
-        self.repos.append(git_dir)
-        git_info = self.git.get_tree_info(git_dir)
-        text_commits = filter(lambda x: x, git_info.split('\n'))
-        new_commits = list(map(Commit, text_commits))
-        self.commits += new_commits
-
-        self.analyze(new_commits, source)
+        self.repos.append(repo_dir)
+        log_output = git_log(repo_dir)
+        new_commits = [
+            c for c in (Commit.parse(line) for line in log_output.splitlines() if line)
+            if c is not None
+        ]
+        self.commits.extend(new_commits)
+        self._analyze(new_commits, source)
 
     @property
-    def sorted_persons(self):
-        return sorted(self.persons.items(), key=lambda p: p[1].as_author + p[1].as_committer)
+    def sorted_persons(self) -> list[tuple[str, Person]]:
+        return sorted(
+            self.persons.items(),
+            key=lambda item: item[1].as_author + item[1].as_committer,
+        )
 
-    def resolve_persons(self):
-        threads = []
-        for _, person in self.persons.items():
-            if person.email in SYSTEM_EMAILS:
-                continue
-            # TODO: optimize
-            thread = Thread(target=self.git.get_verified_username, args=(person.repo_url, person.commit, person))
-            thread.start()
-            threads.append(thread)
+    def resolve_persons(self) -> None:
+        targets = [
+            p for p in self.persons.values()
+            if p.email not in SYSTEM_EMAILS and p.repo_url and p.last_commit_hash
+        ]
+        if not targets:
+            return
+        with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
+            futures = {
+                pool.submit(resolve_github_username, p.repo_url, p.last_commit_hash): p
+                for p in targets
+            }
+            for fut, person in futures.items():
+                login = fut.result()
+                if login:
+                    person.github_login = login
 
-        for thread in threads:
-            thread.join()
+    def _upsert(
+        self, key: str, name: str, email: str, repo_url: str, commit_hash: str,
+    ) -> Person:
+        person = self.persons.get(key) or Person(key=key)
+        person.name = name
+        person.email = email
+        person.repo_url = repo_url
+        person.last_commit_hash = commit_hash
+        self.persons[key] = person
+        return person
 
-    def analyze(self, new_commits, repo_url):
-        # save all author and committers as unique persons
+    def _analyze(self, new_commits: Iterable[Commit], repo_url: str) -> None:
         for commit in new_commits:
-            # author saving
-            person = self.persons.get(commit.author, Person(commit.author))
-            person.name = commit.author_name
-            person.email = commit.author_email
-            person.as_author += 1
-            person.repo_url = repo_url
-            person.commit = commit
-            self.persons[commit.author] = person
+            author = self._upsert(
+                commit.author, commit.author_name, commit.author_email,
+                repo_url, commit.hash,
+            )
+            author.as_author += 1
 
-            # committer saving
-            person = self.persons.get(commit.committer, Person(commit.committer))
-            person.name = commit.committer_name
-            person.email = commit.committer_email
-            person.as_committer += 1
-            person.repo_url = repo_url
-            person.commit = commit
-            self.persons[commit.committer] = person
+            committer = self._upsert(
+                commit.committer, commit.committer_name, commit.committer_email,
+                repo_url, commit.hash,
+            )
+            committer.as_committer += 1
 
-        # make persons graph links based on author/committer mismatch
-        for commit in new_commits:
             if not commit.author_committer_same:
-                self.persons[commit.author].also_known[commit.committer] = self.persons[commit.committer]
-                self.persons[commit.committer].also_known[commit.author] = self.persons[commit.author]
+                author.also_known[commit.committer] = committer
+                committer.also_known[commit.author] = author
 
-        # TODO: probabilistic graph links based on same names/emails and Levenshtein distance
-        # just checking same names now
+            self.name_to_emails[commit.author_name].add(commit.author_email)
+            self.name_to_emails[commit.committer_name].add(commit.committer_email)
 
-        for commit in new_commits:
-            author_emails = self.names.get(commit.author_name, set())
-            author_emails.add(commit.author_email)
-            self.names[commit.author_name] = author_emails
+        # Group names that share the exact same set of emails — these are
+        # treated as the same person. O(n) instead of the previous O(n²).
+        emails_to_names: dict[frozenset[str], list[str]] = defaultdict(list)
+        for name, emails in self.name_to_emails.items():
+            emails_to_names[frozenset(emails)].append(name)
+        self.same_emails_persons = {
+            ",".join(sorted(names)): (sorted(names), set(emails))
+            for emails, names in emails_to_names.items()
+            if len(names) > 1
+        }
 
-            committer_emails = self.names.get(commit.committer_name, set())
-            committer_emails.add(commit.committer_email)
-            self.names[commit.committer_name] = committer_emails
+    def __str__(self) -> str:
+        parts: list[str] = [
+            f'Analyze of the git repo(s) "{", ".join(self.repos)}"',
+            "",
+            "Verbose persons info:",
+        ]
+        for _, person in self.sorted_persons:
+            parts.append(DELIMITER)
+            parts.append(str(person))
 
-        for emails_set in self.names.values():
-            names = [name for name, v in self.names.items() if v == emails_set]
-            key = ','.join(sorted(names))
-            if len(names) > 1 and key not in self.same_emails_persons:
-                self.same_emails_persons[key] = (names, emails_set)
-
-        return self.sorted_persons
-
-    def __str__(self):
-        result = 'Analyze of the git repo(s) "{}"'.format(', '.join(self.repos))
-
-        result += '\nVerbose persons info:\n'
-        for name, person in self.sorted_persons:
-            result += ("{}\n{}\n".format(DELIMITER, person))
-
-        matching_result = ''
-        for name, emails in self.names.items():
+        matching: list[str] = []
+        for name, emails in self.name_to_emails.items():
             if len(emails) > 1:
-                matching_result += '\n{} is the owner of emails:\n\t\t\t{}\n'.format(name, '\n\t\t\t'.join(emails))
+                emails_block = "\n\t\t\t".join(sorted(emails))
+                matching.append(
+                    f"\n{name} is the owner of emails:\n\t\t\t{emails_block}"
+                )
+        if matching:
+            parts.append("")
+            parts.append("Matching info:")
+            parts.append(DELIMITER + "".join(matching))
 
-        if matching_result:
-            result += '\nMatching info:\n{}{}'.format(DELIMITER, matching_result)
+        for names, _ in self.same_emails_persons.values():
+            parts.append(f"\n{' and '.join(names)} are the same person")
 
-        for names, emails in self.same_emails_persons.values():
-            result += '\n{} are the same person\n'.format(' and '.join(names))
-
-        result += '\nStatistics info:\n{}'.format(DELIMITER)
-        result += '\nTotal persons: {}'.format(len(self.persons))
-
-        return result
+        parts.append("")
+        parts.append("Statistics info:")
+        parts.append(DELIMITER)
+        parts.append(f"Total persons: {len(self.persons)}")
+        return "\n".join(parts)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Extract accounts\' information from git repo and make some researches.')
-    parser.add_argument('-d', '--dir', help='directory with git project(s)')
-    parser.add_argument('-u', '--url', help='url of git repo')
-    parser.add_argument('--github', action='store_true', help='try to extract extended info from GitHub')
-    parser.add_argument('--nickname', type=str, help='try to download repos from all platforms by nickname')
-    parser.add_argument('-r', '--recursive', action='store_true', help='recursive directory processing')
-    parser.add_argument('--debug', action='store_true', help='print debug information')
-    # TODO: clone repos as bare
-    # TODO: allow forks
+# ---------- CLI ----------
 
-    args = parser.parse_args()
-    log_level = logging.INFO if not args.debug else logging.DEBUG
-    logging.basicConfig(level=log_level, format='-'*40 + '\n%(levelname)s: %(message)s')
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract accounts' information from git repo and make some researches.",
+    )
+    parser.add_argument("-d", "--dir", help="directory with git project(s)")
+    parser.add_argument("-u", "--url", help="url of git repo")
+    parser.add_argument(
+        "--github", action="store_true",
+        help="try to extract extended info from GitHub",
+    )
+    parser.add_argument(
+        "--nickname", type=str,
+        help="download repos from GitHub by nickname",
+    )
+    parser.add_argument(
+        "-r", "--recursive", action="store_true",
+        help="recursive directory processing",
+    )
+    parser.add_argument(
+        "--repos-dir", default=DEFAULT_REPOS_DIR,
+        help=f"directory to clone remote repositories into (default: {DEFAULT_REPOS_DIR})",
+    )
+    parser.add_argument("--debug", action="store_true", help="print debug information")
+    return parser.parse_args()
 
-    analyst = None
 
-    analyst = GitAnalyst()
-    repos = []
-
-    repos.append(args.url)
-    repos.append(args.dir and args.dir.rstrip('/'))
-
-    if args.recursive and args.dir:
-        dirs = find_all_repos_recursively(args.dir)
-        repos += dirs
-
+def _collect_sources(args: argparse.Namespace) -> list[str]:
+    sources: list[str] = []
+    if args.url:
+        sources.append(args.url)
+    if args.dir:
+        sources.append(args.dir.rstrip("/"))
+        if args.recursive:
+            sources.extend(find_all_repos_recursively(args.dir))
     if args.nickname:
-        repos_count = get_public_repos_count(args.nickname)
-        if repos_count:
-            print('found', repos_count, 'repos')
-            repos += get_github_repos(args.nickname, repos_count=repos_count)
+        count = get_public_repos_count(args.nickname)
+        if count:
+            print(f"found {count} repos")
+            sources.extend(get_github_repos(args.nickname, repos_count=count))
+    return sources
 
-    for repo in repos:
-        analyst.append(source=repo)
 
-    logging.info('Resolving GitHub usernames, please wait...')
+def main() -> None:
+    args = _parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="-" * 40 + "\n%(levelname)s: %(message)s",
+    )
+
+    sources = _collect_sources(args)
+    if not sources:
+        print("Run me with git repo link or path!")
+        return
+
+    analyst = GitAnalyst(repos_dir=args.repos_dir)
+    for source in sources:
+        analyst.append(source)
+
+    logger.info("Resolving GitHub usernames, please wait...")
     analyst.resolve_persons()
 
     if analyst.repos:
         print(analyst)
     else:
-        print('Run me with git repo link or path!')
+        print("Run me with git repo link or path!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
