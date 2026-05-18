@@ -41,9 +41,38 @@ HTTP_USER_AGENT = "gitcolombo/0.2"
 RESOLVE_WORKERS = 8
 DEFAULT_REPOS_DIR = "repos"
 
+GITHUB_GPG_KEYS_URL = "https://api.github.com/users/{nickname}/gpg_keys"
+GITHUB_SEARCH_COMMITS_URL = (
+    "https://api.github.com/search/commits?q=author:{nickname}"
+    "&per_page={per_page}&page={page}"
+)
+GITHUB_SEARCH_MAX_PAGES = 10  # /search/* caps results at 1000
+
+# Well-known git trailer keys (DCO sign-off, GitHub co-authorship, kernel reviews).
+# A real email in any of these is a strong identity signal: trailers are
+# typically added intentionally by tooling (`git commit -s`, GitHub UI's
+# "Co-authored-by", patch-review workflows) rather than being auto-generated.
+TRAILER_RE = re.compile(
+    r"^(?P<key>Signed-off-by|Co-authored-by|Reviewed-by|Tested-by|"
+    r"Reported-by|Acked-by|Suggested-by|Cc):\s+"
+    r"(?P<name>[^<]+?)\s+<(?P<email>[^>]+)>\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
 SYSTEM_EMAILS = frozenset({"noreply@github.com"})
 
 logger = logging.getLogger("gitcolombo")
+
+# Service noreply addresses from any vendor (github, anthropic, gitlab, ...)
+# plus GitHub's user-private `{id}+{login}@users.noreply.github.com` pattern.
+SYSTEM_EMAIL_RE = re.compile(
+    r'(^(?:noreply|no-reply|donotreply|do-not-reply)@|@users\.noreply\.github\.com$)',
+    re.IGNORECASE,
+)
+
+
+def is_system_email(email):
+    return bool(email and SYSTEM_EMAIL_RE.search(email))
 
 
 # ---------- HTTP helpers ----------
@@ -70,6 +99,28 @@ def _http_get_json(url: str):
 
 
 # ---------- GitHub API ----------
+
+def _gh_authed(url: str, token: str | None):
+    """Like _http_get_json but with optional bearer token (for higher rate limits)."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            payload = resp.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        logger.debug("GET %s failed: %s", url, exc)
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.debug("Bad JSON from %s: %s", url, exc)
+        return None
+
 
 def get_public_repos_count(nickname: str) -> int:
     data = _http_get_json(GITHUB_USER_URL.format(nickname=nickname))
@@ -109,6 +160,154 @@ def resolve_github_username(repo_url: str, commit_hash: str) -> str | None:
         return None
     match = GITHUB_COMMIT_AUTHOR_RE.search(page.decode("utf-8", errors="replace"))
     return match.group(1) if match else None
+
+
+def get_gpg_keys_emails(nickname: str, token: str | None = None):
+    """Fetch user-uploaded PGP keys via /users/{u}/gpg_keys and yield emails.
+
+    These emails come from the key's UIDs — the user uploaded them themselves,
+    so this is a direct identity disclosure. `verified=True` means GitHub has
+    confirmed the user controls that mailbox.
+
+    Yields dicts: {email, verified, key_id, created_at, source}.
+    """
+    keys = _gh_authed(GITHUB_GPG_KEYS_URL.format(nickname=nickname), token)
+    if not keys:
+        return
+    seen: set[str] = set()
+
+    def _walk(key, source):
+        if not key or key.get("revoked"):
+            return
+        key_id = key.get("key_id", "")
+        created = key.get("created_at", "")
+        for entry in (key.get("emails") or []):
+            email = entry.get("email")
+            if not email:
+                continue
+            k = email.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            yield {
+                "email": email,
+                "verified": bool(entry.get("verified")),
+                "key_id": key_id,
+                "created_at": created,
+                "source": source,
+            }
+
+    for key in keys:
+        yield from _walk(key, "primary")
+        for sub in (key.get("subkeys") or []):
+            yield from _walk(sub, "subkey")
+
+
+def print_gpg_results(results, ignore_noreply: bool = True) -> bool:
+    """Pretty-print get_gpg_keys_emails() output. Returns True if printed."""
+    rows = [
+        r for r in results
+        if not (ignore_noreply and is_system_email(r["email"]))
+    ]
+    if not rows:
+        return False
+    print("PGP key UIDs (uploaded by the user, public via /users/{u}/gpg_keys):")
+    print(DELIMITER)
+    rows.sort(key=lambda r: (not r["verified"], r["email"]))
+    for r in rows:
+        flag = "verified" if r["verified"] else "unverified"
+        print("  {:40}  [{}]  key_id={}  ({})".format(
+            r["email"], flag, r["key_id"] or "?", r["source"],
+        ))
+    print()
+    return True
+
+
+def search_commits_by_author(nickname: str, token: str | None = None):
+    """Use /search/commits?q=author:{u} to find commits across all of public GitHub.
+
+    Also extracts well-known git trailers from each commit message body
+    (Signed-off-by, Co-authored-by, Reviewed-by, etc.).
+
+    Yields dicts: {email, name, role, repo, sha, date}.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    for page in range(1, GITHUB_SEARCH_MAX_PAGES + 1):
+        url = GITHUB_SEARCH_COMMITS_URL.format(
+            nickname=nickname, per_page=GITHUB_PER_PAGE, page=page,
+        )
+        data = _gh_authed(url, token)
+        if not data:
+            return
+        items = data.get("items") or []
+        if not items:
+            return
+        for item in items:
+            commit = item.get("commit") or {}
+            repo = (item.get("repository") or {}).get("full_name", "")
+            sha = item.get("sha", "")
+            date = (commit.get("author") or {}).get("date", "")
+            message = commit.get("message") or ""
+            for role in ("author", "committer"):
+                who = commit.get(role) or {}
+                email = who.get("email")
+                name = who.get("name") or ""
+                if not email:
+                    continue
+                key = (email.lower(), name.lower(), role)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield {"email": email, "name": name, "role": role,
+                       "repo": repo, "sha": sha, "date": date}
+            # trailers in the commit message body
+            for tm in TRAILER_RE.finditer(message):
+                t_key = tm.group("key").lower()
+                t_name = (tm.group("name") or "").strip()
+                t_email = (tm.group("email") or "").strip()
+                if not t_email:
+                    continue
+                # reject malformed names: ':' implies another trailer label was
+                # crammed onto the same line; '@' implies a @-mention or stray
+                # handle. Real personal names don't contain either.
+                if ":" in t_name or "@" in t_name:
+                    continue
+                key = (t_email.lower(), t_name.lower(), t_key)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield {"email": t_email, "name": t_name, "role": t_key,
+                       "repo": repo, "sha": sha, "date": date}
+        if len(items) < GITHUB_PER_PAGE:
+            return
+
+
+def print_search_results(results, ignore_noreply: bool = True) -> None:
+    """Pretty-print search_commits_by_author() output grouped by (email, name)."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in results:
+        if ignore_noreply and is_system_email(r["email"]):
+            continue
+        key = (r["email"], r["name"])
+        groups.setdefault(key, []).append(r)
+
+    if not groups:
+        print("No public commits found via /search/commits.")
+        return
+
+    print(f"Found {len(groups)} unique (email, name) identities:")
+    print(DELIMITER)
+    ordered = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+    for (email, name), rows in ordered:
+        repos = sorted({r["repo"] for r in rows if r["repo"]})
+        roles = sorted({r["role"] for r in rows})
+        print("{}  <{}>  x{}  [{}]".format(
+            name or "<no name>", email, len(rows), ", ".join(roles),
+        ))
+        for repo in repos[:5]:
+            print(f"    repo: {repo}")
+        if len(repos) > 5:
+            print(f"    ... +{len(repos) - 5} more repos")
 
 
 # ---------- Filesystem helpers ----------
@@ -386,6 +585,15 @@ def _parse_args() -> argparse.Namespace:
         help="download repos from GitHub by nickname",
     )
     parser.add_argument(
+        "--search", type=str, metavar="USERNAME",
+        help="API-only path: query /users/{u}/gpg_keys + /search/commits "
+             "for emails (no cloning, ~1000 commit results max)",
+    )
+    parser.add_argument(
+        "--no-ignore-noreply", action="store_true",
+        help="do not filter service noreply addresses from --search results",
+    )
+    parser.add_argument(
         "-r", "--recursive", action="store_true",
         help="recursive directory processing",
     )
@@ -419,6 +627,17 @@ def main() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="-" * 40 + "\n%(levelname)s: %(message)s",
     )
+
+    if args.search:
+        token = os.environ.get("GITHUB_TOKEN")
+        ignore = not args.no_ignore_noreply
+        gpg = list(get_gpg_keys_emails(args.search, token=token))
+        had_gpg = print_gpg_results(gpg, ignore_noreply=ignore)
+        results = list(search_commits_by_author(args.search, token=token))
+        print_search_results(results, ignore_noreply=ignore)
+        if not had_gpg and not results:
+            print("No emails found via /gpg_keys or /search/commits.")
+        return
 
     sources = _collect_sources(args)
     if not sources:
