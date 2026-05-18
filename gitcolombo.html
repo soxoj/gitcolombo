@@ -455,7 +455,11 @@
         <li><code>GET /users/{u}/events/public?per_page=100</code><br>
             → iterate <code>PushEvent.payload.commits[].author.{email, name}</code><br>
             → covers roughly the last 90 days of public activity</li>
-        <li>If <code>/events</code> returned nothing useful, fall back to:
+        <li><code>GET /search/commits?q=author:{u}&per_page=100</code> (paginated, cap ~1000)<br>
+            → catches commits in <em>any</em> public repo, not just the user's own;
+            surfaces old emails that fell out of the 90-day events window.
+            This is what GitFive's "lite" mode does too.</li>
+        <li>If the steps above returned only noreply addresses, fall back to:
           <ul>
             <li><code>GET /users/{u}/repos?sort=updated</code> — list non-fork repos</li>
             <li><code>GET /repos/{owner}/{repo}/commits?author={u}</code> — commits attributed to this account</li>
@@ -790,6 +794,34 @@ async function findEmailByUsername(username) {
   } catch (e) {
     if (e.message === "STOPPED") throw e;
     setStatus("events lookup failed: " + e.message, { error: true });
+  }
+
+  // /search/commits — catches commits in ANY public repo, not just the
+  // user's own; surfaces old emails that fell out of the 90-day events window.
+  // /search/* has a stricter rate limit (10/min unauth, 30/min auth) and
+  // caps at 1000 results = 10 pages of 100.
+  setStatus("scanning /search/commits…", { spin: true });
+  try {
+    for (let page = 1; page <= 10; page++) {
+      if (stopFlag) break;
+      const data = await ghFetch(
+        `/search/commits?q=author:${encodeURIComponent(username)}&per_page=100&page=${page}`
+      );
+      const items = (data && data.items) || [];
+      if (items.length === 0) break;
+      for (const item of items) {
+        const c = item.commit || {};
+        const repoFull = item.repository && item.repository.full_name;
+        const a = c.author, co = c.committer;
+        if (a)  record(a.email, a.name, repoFull);
+        if (co) record(co.email, co.name, repoFull);
+        recordTrailers(c.message, repoFull);
+      }
+      if (items.length < 100) break;
+    }
+  } catch (e) {
+    if (e.message === "STOPPED") throw e;
+    // soft-fail: /search rate-limit is harsh; whatever was found so far stays
   }
 
   const havePublicReal = [...identities.values()].some((i) => !i.noreply);

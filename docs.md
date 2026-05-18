@@ -78,7 +78,7 @@ Limitations: many users never upload a PGP key. None of the surveyed
 peer tools (gitrecon, EmailFinder, GitFive, Gitmails, etc.) use this
 endpoint, so it is a unique source.
 
-### Step 3 — Public events (primary commit source)
+### Step 3 — Public events (recent commits)
 
 ```
 GET https://api.github.com/users/{username}/events/public?per_page=100
@@ -113,9 +113,33 @@ stamps the commit with whatever email is configured locally
 if the user later enables "Keep my email address private" in the web
 UI — events that already happened are not rewritten.
 
-### Step 4 — Commits fallback
+### Step 4 — Commit search across all public repos
 
-If `/events/public` returned nothing useful (e.g. the user has been
+```
+GET https://api.github.com/search/commits?q=author:{username}&per_page=100&page={n}
+```
+
+Unlike `/events/public`, the commit-search index spans **every public
+commit on GitHub** that has been associated (by email or login) with the
+target account, including commits in repositories the user does not
+own. It also surfaces old commits that fell out of the 90-day events
+window.
+
+The endpoint caps results at 1000 commits = 10 pages of 100. Rate limit
+is stricter than core: 10 req/min unauthenticated, 30 req/min with a
+token (vs 5000/hr for core endpoints).
+
+For each `item` we read both the author/committer pair from
+`item.commit.{author, committer}` and parse trailers from
+`item.commit.message` (see the "Commit-message trailer extraction"
+section).
+
+This is the same approach GitFive uses for its "lite" search mode and
+the reason it surfaces emails that older tools miss.
+
+### Step 5 — Commits fallback
+
+If the steps above returned nothing useful (e.g. the user has been
 inactive for more than ~90 days, or every event email is
 `@users.noreply.github.com`), we fall back to scanning commits in
 the user's own repositories:
@@ -139,7 +163,7 @@ The `?author=` filter on the commits endpoint accepts either a
 GitHub login or an email — using the login restricts results to
 commits GitHub has actually linked to this account.
 
-### Step 5 — Ranking
+### Step 6 — Ranking
 
 Each unique `(email, name)` pair is annotated with:
 
