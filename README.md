@@ -1,81 +1,110 @@
 # Gitcolombo
 
-![Logo](https://telegra.ph/file/0730b125282266989e861.png)
+<p align="center">
+  <img src="https://telegra.ph/file/0730b125282266989e861.png" alt="Gitcolombo" width="320">
+</p>
 
-### Description
+OSINT tool that extracts identities — names, emails, and links between
+seemingly unrelated accounts — from git repositories and GitHub.
 
-OSINT tool to extract info about persons from git repositories: common names, emails, matches between different (as it may seems) accounts.
+- **Python CLI** (`gitcolombo.py`) — clones repos, walks `git log`, and can
+  call the GitHub API for richer signals.
+- **Web version** (`gitcolombo.html`) — a single static HTML file; open it
+  in a browser and query the GitHub API directly, no install.
 
-### Using
+For the full breakdown of where each email/name comes from
+(PGP keys, public events, commit search, commit-message trailers, etc.)
+see **[docs.md](./docs.md)**.
 
-1. **Install git**
+## Web version
 
-2. Run:
+Hosted at **<https://gitcolombo.soxoj.com>** — or open `gitcolombo.html`
+locally. A single static HTML file that queries the GitHub API straight
+from your browser; no install, no backend.
 
-        # from any git url
-        ./gitcolombo.py -u https://github.com/Kalanchyovskaia16/newlps
+<p align="center">
+  <img src="gitcolombo.png" alt="Gitcolombo web version" width="640">
+</p>
 
-        # from directory, recursively
-        ./gitcolombo.py -d ./newlps -r
+## Install
 
-        # from all GitHub personal/org repos by nickname
-        ./gitcolombo.py --nickname LubyRuffy
+Requires Python 3.10+ and a working `git` binary. No third-party
+dependencies.
 
-        # change where remote repos get cloned (default: ./repos)
-        ./gitcolombo.py -u https://github.com/Kalanchyovskaia16/newlps --repos-dir ./clones
+```sh
+git clone https://github.com/Soxoj/gitcolombo
+cd gitcolombo
+```
 
-Remote repositories are cloned into `./repos/` by default; override with `--repos-dir`.
+## Usage
 
-For batch cloning from Gitlab and Bitbucket group repos you can use [ghorg](https://github.com/gabrie30/ghorg).
+```sh
+# from any git URL
+./gitcolombo.py -u https://github.com/Soxoj/maigret
 
-Output:
+# from a local directory, recursively
+./gitcolombo.py -d ./maigret -r
 
-- verbose persons info
-  - name
-  - email
-  - number of appearences as author/committer 
-  - other persons that person can be
+# clone and scan every public repo of a GitHub user/org
+./gitcolombo.py --nickname octocat
 
-- emails used for the same name
-- different names for the same person
-- general statistics
+# API-only: find emails for a GitHub username without cloning
+./gitcolombo.py --search Soxoj
 
-### Testing
+# change where remote repos get cloned (default: ./repos)
+./gitcolombo.py -u https://github.com/Soxoj/maigret --repos-dir ./clones
+```
 
-Stdlib-only test suite (`test_gitcolombo.py`), no third-party dependencies.
-Run from the repo root:
+Remote repositories are cloned into `./repos/` by default; override
+with `--repos-dir`. For batch cloning from GitLab and Bitbucket groups
+use [ghorg](https://github.com/gabrie30/ghorg).
 
-        python3 -m unittest test_gitcolombo -v
+## Output
 
-The end-to-end test creates a real git repository in a temp directory, so a
-working `git` binary is required (the test is skipped if `git` is missing).
+- Per-person details: name, email, author/committer counts, and other
+  identities that may belong to the same person.
+- Emails that share a name.
+- Different names tied to the same email.
+- General statistics across the scanned repos.
+
+## Why it works
+
+Developers often commit with one identity (e.g. work account), then
+switch to another (e.g. personal account) and run `git commit --amend`,
+forgetting that this rewrites the *committer* but leaves the original
+*author* in place. The two roles drift apart, and that mismatch is
+exactly what gitcolombo correlates.
+
+Short explainer on author vs. committer:
+<https://stackoverflow.com/questions/18750808/difference-between-author-and-committer-in-git>
+
+## Testing
+
+Stdlib-only test suite — no third-party dependencies. From the repo root:
+
+```sh
+python3 -m unittest test_gitcolombo -v
+```
+
+The end-to-end test creates a real git repository in a temp directory,
+so a working `git` binary is required (the test is skipped if `git` is
+missing).
 
 Tests run on every push and pull request via GitHub Actions
 (`.github/workflows/tests.yml`) across Python 3.10–3.13.
 
-### Details
+## Further reading
 
-[RUS] https://telegra.ph/Gitcolombo---OSINT-v-GitHub-03-02
+- [docs.md](./docs.md) — extraction methods, ranking, filters, rate limits
+- [RUS] <https://telegra.ph/Gitcolombo---OSINT-v-GitHub-03-02>
 
-### What's the difference between git author and committer?
-
-TL;DR
-
-- author wrote the code (make the patch)
-- commiter commit it to the repo (rewrite history, make pull/merge requests...)
-
-Nice explanation: https://stackoverflow.com/questions/18750808/difference-between-author-and-committer-in-git
-
-Very often developers make inaccurate commits with the one name/email (e.g. work account), then change to the right (e.g. personal account) and make `git commit --amend`, but forget to change the author of the commit.
-This way we can use it for OSINT as match of names/emails from git history.
-
-### TODO
+## Roadmap
 
 - [x] Total statistics for repos in a directory
-- [ ] Check different names for every email
 - [x] GitHub support: clone all repos from account/group
-- [ ] GitHub support: api pagination
 - [x] GitHub support: extract links to accounts from commit info
-- [ ] Exclude "system" accounts (e.g. noreply@github.com)
-- [ ] Probabilistic graph links based on same names/emails and Levenshtein distance
-- [ ] Other popular git platforms: Gitlab, Bitbucket and also
+- [x] GitHub support: API pagination
+- [x] Exclude "system" accounts (e.g. `noreply@github.com`, `@users.noreply.github.com`)
+- [ ] Reverse mapping email → names (currently only name → emails)
+- [ ] Probabilistic graph links based on shared names/emails and Levenshtein distance
+- [ ] Other popular git platforms: GitLab, Bitbucket
