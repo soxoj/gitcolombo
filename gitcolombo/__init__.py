@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Gitcolombo — OSINT tool: extract account info from git repositories.
 
 Walks one or more git repositories and aggregates per-person stats
@@ -7,6 +6,13 @@ identity overlaps via shared emails or shared names. Optionally resolves
 GitHub logins by scraping commit pages.
 """
 from __future__ import annotations
+
+__title__ = "Gitcolombo"
+__author__ = "Soxoj"
+__author_email__ = "soxoj@protonmail.com"
+__license__ = "MIT"
+
+from .__version__ import __version__
 
 import argparse
 import json
@@ -40,7 +46,7 @@ GITHUB_REPOS_URL = (
 GITHUB_PER_PAGE = 100
 
 HTTP_TIMEOUT = 15
-HTTP_USER_AGENT = "gitcolombo/0.2"
+HTTP_USER_AGENT = f"gitcolombo/{__version__}"
 RESOLVE_WORKERS = 8
 CLONE_WORKERS = 8
 DEFAULT_REPOS_DIR = "repos"
@@ -831,6 +837,7 @@ class GitAnalyst:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        prog="gitcolombo",
         description="Extract accounts' information from git repo and make some researches.",
     )
     parser.add_argument("-d", "--dir", help="directory with git project(s)")
@@ -956,7 +963,3 @@ def main() -> None:
         print(analyst)
     else:
         print("Run me with git repo link or path!")
-
-
-if __name__ == "__main__":
-    main()

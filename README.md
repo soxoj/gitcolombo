@@ -29,31 +29,41 @@ from your browser; no install, no backend.
 ## Install
 
 Requires Python 3.10+ and a working `git` binary. No third-party
-dependencies.
+Python dependencies.
+
+```sh
+pip install gitcolombo
+```
+
+Or from source:
 
 ```sh
 git clone https://github.com/Soxoj/gitcolombo
 cd gitcolombo
+pip install -e .
 ```
 
 ## Usage
 
 ```sh
 # from any git URL
-./gitcolombo.py -u https://github.com/Soxoj/maigret
+gitcolombo -u https://github.com/Soxoj/maigret
 
 # from a local directory, recursively
-./gitcolombo.py -d ./maigret -r
+gitcolombo -d ./maigret -r
 
 # clone and scan every public repo of a GitHub user/org
-./gitcolombo.py --nickname octocat
+gitcolombo --nickname octocat
 
 # API-only: find emails for a GitHub username without cloning
-./gitcolombo.py --search Soxoj
+gitcolombo --search Soxoj
 
 # change where remote repos get cloned (default: ./repos)
-./gitcolombo.py -u https://github.com/Soxoj/maigret --repos-dir ./clones
+gitcolombo -u https://github.com/Soxoj/maigret --repos-dir ./clones
 ```
+
+`python -m gitcolombo` works equivalently if you'd rather not put the
+script on `$PATH`.
 
 Remote repositories are cloned into `./repos/` by default; override
 with `--repos-dir`. For batch cloning from GitLab and Bitbucket groups
@@ -80,7 +90,8 @@ Short explainer on author vs. committer:
 
 ## Testing
 
-Stdlib-only test suite — no third-party dependencies. From the repo root:
+Stdlib-only test suite — no third-party dependencies. From the repo root
+(after `pip install -e .`):
 
 ```sh
 python3 -m unittest test_gitcolombo -v

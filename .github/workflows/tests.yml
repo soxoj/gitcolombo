@@ -4,13 +4,15 @@ on:
   push:
     branches: [master, main]
     paths:
-      - "gitcolombo.py"
+      - "gitcolombo/**"
       - "test_gitcolombo.py"
+      - "pyproject.toml"
       - ".github/workflows/tests.yml"
   pull_request:
     paths:
-      - "gitcolombo.py"
+      - "gitcolombo/**"
       - "test_gitcolombo.py"
+      - "pyproject.toml"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
 
@@ -36,8 +38,14 @@ jobs:
           git config --global init.defaultBranch main
           git config --global commit.gpgsign false
 
+      - name: Install package (editable)
+        run: pip install -e .
+
       - name: Run tests
         run: python -m unittest test_gitcolombo -v
 
-      - name: Smoke-check CLI
-        run: python gitcolombo.py --help
+      - name: Smoke-check CLI (module form)
+        run: python -m gitcolombo --help
+
+      - name: Smoke-check CLI (entry-point script)
+        run: gitcolombo --help

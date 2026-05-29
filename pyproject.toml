@@ -1,0 +1,47 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "gitcolombo"
+version = "0.3.0"
+description = "🕵️ OSINT tool to extract identities (names, emails, GitHub logins) from git repositories and the GitHub API."
+authors = ["Soxoj <soxoj@protonmail.com>"]
+readme = "README.md"
+license = "MIT"
+homepage = "https://pypi.org/project/gitcolombo"
+repository = "https://github.com/soxoj/gitcolombo"
+keywords = ["osint", "git", "github", "email", "investigation", "recon", "doxing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Topic :: Security",
+    "Topic :: Software Development :: Version Control :: Git"
+]
+include = ["gitcolombo/*.py"]
+
+[tool.poetry.urls]
+"Bug Tracker" = "https://github.com/soxoj/gitcolombo/issues"
+"Web version" = "https://gitcolombo.soxoj.com"
+
+[tool.poetry.dependencies]
+# Stdlib-only by design — git binary is the only external requirement.
+python = "^3.10"
+
+[tool.poetry.group.dev.dependencies]
+# poetry install --with dev
+pytest = ">=8.0,<10.0"
+coverage = "^7.0"
+
+[tool.poetry.scripts]
+# Installed by `pip install gitcolombo`. Run with `gitcolombo --help`.
+gitcolombo = "gitcolombo:main"
