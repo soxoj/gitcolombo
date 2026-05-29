@@ -14,6 +14,9 @@ import logging
 import os
 import re
 import subprocess
+import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
@@ -39,6 +42,7 @@ GITHUB_PER_PAGE = 100
 HTTP_TIMEOUT = 15
 HTTP_USER_AGENT = "gitcolombo/0.2"
 RESOLVE_WORKERS = 8
+CLONE_WORKERS = 8
 DEFAULT_REPOS_DIR = "repos"
 
 GITHUB_GPG_KEYS_URL = "https://api.github.com/users/{nickname}/gpg_keys"
@@ -73,6 +77,74 @@ SYSTEM_EMAIL_RE = re.compile(
 
 def is_system_email(email):
     return bool(email and SYSTEM_EMAIL_RE.search(email))
+
+
+# ---------- Terminal styling ----------
+
+# ANSI 256-color palette, picked to mirror the web UI's green-on-black look.
+NEON = "\033[38;5;46m"   # primary bright green
+LIME = "\033[38;5;82m"   # highlight (slightly lighter)
+GREEN_DIM = "\033[38;5;34m"   # secondary green
+GREY = "\033[38;5;240m"  # faint borders / dot-leaders
+RED = "\033[38;5;196m"   # warnings / noreply tags
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+BANNER = r"""
+ ░██████╗░██╗████████╗░█████╗░░█████╗░██╗░░░░░░█████╗░███╗░░░███╗██████╗░░█████╗░
+ ██╔════╝░██║╚══██╔══╝██╔══██╗██╔══██╗██║░░░░░██╔══██╗████╗░████║██╔══██╗██╔══██╗
+ ██║░░██╗░██║░░░██║░░░██║░░╚═╝██║░░██║██║░░░░░██║░░██║██╔████╔██║██████╦╝██║░░██║
+ ██║░░╚██╗██║░░░██║░░░██║░░██╗██║░░██║██║░░░░░██║░░██║██║╚██╔╝██║██╔══██╗██║░░██║
+ ╚██████╔╝██║░░░██║░░░╚█████╔╝╚█████╔╝███████╗╚█████╔╝██║░╚═╝░██║██████╦╝╚█████╔╝
+ ░╚═════╝░╚═╝░░░╚═╝░░░░╚════╝░░╚════╝░╚══════╝░╚════╝░╚═╝░░░░░╚═╝╚═════╝░░╚════╝░
+                         :: git commit osint ::
+"""
+
+_COLOR_ENABLED = False
+RULE_WIDTH = 80
+
+
+def _setup_colors(force_off: bool) -> None:
+    global _COLOR_ENABLED
+    if force_off or os.environ.get("NO_COLOR"):
+        _COLOR_ENABLED = False
+        return
+    try:
+        _COLOR_ENABLED = sys.stdout.isatty()
+    except Exception:
+        _COLOR_ENABLED = False
+
+
+def _c(code: str, text: str) -> str:
+    return f"{code}{text}{RESET}" if _COLOR_ENABLED else text
+
+
+def _rule(width: int = RULE_WIDTH) -> str:
+    return _c(GREY, "─" * width)
+
+
+def _tag(text: str, color: str = GREEN_DIM) -> str:
+    return _c(color, f"[{text}]")
+
+
+def _email_with_tag(email: str) -> str:
+    """Bare email, with a trailing [noreply] tag if it's a service address."""
+    out = _c(NEON, email)
+    if is_system_email(email):
+        out += " " + _tag("noreply", RED)
+    return out
+
+
+def _email_brackets(email: str) -> str:
+    """<email> [noreply]? — tag stays outside the angle brackets."""
+    out = _c(GREEN_DIM, "<") + _c(NEON, email) + _c(GREEN_DIM, ">")
+    if is_system_email(email):
+        out += " " + _tag("noreply", RED)
+    return out
+
+
+def _section(title: str) -> list[str]:
+    return ["", _rule(), _c(GREEN_DIM, f"[ {title} ]"), _rule(), ""]
 
 
 # ---------- HTTP helpers ----------
@@ -132,10 +204,18 @@ def get_public_repos_count(nickname: str) -> int:
 def get_github_repos(
     nickname: str, repos_count: int, include_forks: bool = False,
 ) -> set[str]:
+    """Return URLs of *nickname*'s repos. Forks dropped unless include_forks.
+
+    Logs a per-call summary (seen / forks-skipped / failed-pages) at INFO so
+    the caller can explain a "245 found → only 31 cloned" gap.
+    """
     if repos_count <= 0:
         return set()
     last_page = (repos_count + GITHUB_PER_PAGE - 1) // GITHUB_PER_PAGE
     repos: set[str] = set()
+    seen = 0
+    forks_skipped = 0
+    failed_pages = 0
     for page in range(1, last_page + 1):
         data = _http_get_json(
             GITHUB_REPOS_URL.format(
@@ -143,10 +223,26 @@ def get_github_repos(
             )
         )
         if not data:
+            failed_pages += 1
+            logger.warning(
+                "repos listing page %d/%d returned no data (rate limit? "
+                "try GITHUB_TOKEN env var)", page, last_page,
+            )
             continue
         for repo in data:
-            if include_forks or not repo.get("fork"):
-                repos.add(repo["html_url"])
+            seen += 1
+            if repo.get("fork") and not include_forks:
+                forks_skipped += 1
+                continue
+            repos.add(repo["html_url"])
+    logger.info(
+        "listing: %d seen, %d forks %s, %d kept%s",
+        seen,
+        forks_skipped,
+        "kept" if include_forks else "skipped",
+        len(repos),
+        f", {failed_pages} page(s) failed" if failed_pages else "",
+    )
     return repos
 
 
@@ -211,13 +307,21 @@ def print_gpg_results(results, ignore_noreply: bool = True) -> bool:
     ]
     if not rows:
         return False
-    print("PGP key UIDs (uploaded by the user, public via /users/{u}/gpg_keys):")
-    print(DELIMITER)
+    for line in _section("pgp key uids"):
+        print(line)
+    print("  " + _c(GREEN_DIM, "source: /users/{u}/gpg_keys (user-uploaded)"))
+    print()
     rows.sort(key=lambda r: (not r["verified"], r["email"]))
     for r in rows:
-        flag = "verified" if r["verified"] else "unverified"
-        print("  {:40}  [{}]  key_id={}  ({})".format(
-            r["email"], flag, r["key_id"] or "?", r["source"],
+        flag_color = LIME if r["verified"] else GREEN_DIM
+        flag = _tag("verified" if r["verified"] else "unverified", flag_color)
+        print("  {arrow} {email:40} {flag}  {kid}={key}  {src}".format(
+            arrow=_c(LIME, "▶"),
+            email=_email_with_tag(r["email"]),
+            flag=flag,
+            kid=_c(GREEN_DIM, "key_id"),
+            key=_c(NEON, r["key_id"] or "?"),
+            src=_tag(r["source"]),
         ))
     print()
     return True
@@ -292,22 +396,33 @@ def print_search_results(results, ignore_noreply: bool = True) -> None:
         groups.setdefault(key, []).append(r)
 
     if not groups:
-        print("No public commits found via /search/commits.")
+        print(_c(RED, "[!] no public commits found via /search/commits"))
         return
 
-    print(f"Found {len(groups)} unique (email, name) identities:")
-    print(DELIMITER)
+    for line in _section("commit search"):
+        print(line)
+    print("  " + _c(GREEN_DIM, "identities found: ") + _c(NEON, str(len(groups))))
+    print()
     ordered = sorted(groups.items(), key=lambda kv: -len(kv[1]))
     for (email, name), rows in ordered:
         repos = sorted({r["repo"] for r in rows if r["repo"]})
         roles = sorted({r["role"] for r in rows})
-        print("{}  <{}>  x{}  [{}]".format(
-            name or "<no name>", email, len(rows), ", ".join(roles),
+        print("  {arrow} {name} {brackets}  {hits}  {roles}".format(
+            arrow=_c(LIME, "▶"),
+            name=_c(BOLD + NEON, name or "?"),
+            brackets=_email_brackets(email),
+            hits=_c(LIME, f"×{len(rows)}"),
+            roles=_tag(", ".join(roles)),
         ))
-        for repo in repos[:5]:
-            print(f"    repo: {repo}")
+        for i, repo in enumerate(repos[:5]):
+            last = i == min(4, len(repos) - 1) and len(repos) <= 5
+            branch = "└─" if last else "├─"
+            print("      " + _c(GREEN_DIM, branch) + " "
+                  + _c(GREEN_DIM, "repo  ") + _c(NEON, repo))
         if len(repos) > 5:
-            print(f"    ... +{len(repos) - 5} more repos")
+            print("      " + _c(GREEN_DIM, "└─ ")
+                  + _c(GREEN_DIM, f"... +{len(repos) - 5} more repos"))
+        print()
 
 
 # ---------- Filesystem helpers ----------
@@ -359,6 +474,106 @@ def git_clone(url: str, dest_dir: str) -> str | None:
         logger.debug("git clone failed for %s: %s", url, result.stderr.strip())
         return None
     return target
+
+
+def _short_url(url: str, width: int = 50) -> str:
+    """Trim URL for progress display: keep owner/repo tail."""
+    if len(url) <= width:
+        return url
+    tail = "/".join(url.rstrip("/").split("/")[-2:])
+    return ("…" + tail)[-width:]
+
+
+def clone_many(
+    urls: list[str],
+    dest_dir: str,
+    workers: int = CLONE_WORKERS,
+) -> dict[str, str | None]:
+    """Clone *urls* concurrently. Returns {url: local_path or None}.
+
+    Prints a live progress line to stderr (overwritten on TTY, line-per-tick
+    otherwise) so the user can see what's happening during long clone batches.
+    """
+    total = len(urls)
+    if total == 0:
+        return {}
+
+    results: dict[str, str | None] = {}
+    state = {"done": 0, "ok": 0, "fail": 0, "current": ""}
+    lock = threading.Lock()
+    started = time.monotonic()
+    is_tty = False
+    try:
+        is_tty = sys.stderr.isatty()
+    except Exception:
+        pass
+
+    last_done = {"value": -1}
+
+    def render(final: bool = False) -> None:
+        elapsed = time.monotonic() - started
+        fail_chunk = _c(RED, f"fail={state['fail']}") if state["fail"] else \
+                     _c(GREEN_DIM, "fail=0")
+        line = (
+            _c(GREEN_DIM, "[*] ")
+            + _c(LIME, "cloning ")
+            + _c(NEON, f"{state['done']}/{total}")
+            + "  " + _c(GREEN_DIM, f"ok={state['ok']}")
+            + "  " + fail_chunk
+            + "  " + _c(GREEN_DIM, f"{elapsed:>4.0f}s")
+        )
+        if state["current"] and not final:
+            line += "  " + _c(GREEN_DIM, "· ") + _c(NEON, state["current"])
+        if is_tty:
+            # \r + clear-to-end-of-line keeps the progress on a single line.
+            sys.stderr.write("\r\033[K" + line)
+            if final:
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+        else:
+            # Non-TTY: avoid a flood of identical "0/N" lines while threads
+            # pick up their first job. Only emit when the done counter ticks
+            # forward (or on the final summary).
+            if final or state["done"] != last_done["value"]:
+                last_done["value"] = state["done"]
+                sys.stderr.write(line + "\n")
+
+    def worker(url: str) -> None:
+        with lock:
+            state["current"] = _short_url(url)
+            render()
+        path = git_clone(url, dest_dir)
+        with lock:
+            state["done"] += 1
+            if path:
+                state["ok"] += 1
+            else:
+                state["fail"] += 1
+            # Don't keep stale "current" once this thread is done; the next
+            # worker that picks up a job will overwrite it.
+            state["current"] = ""
+            render()
+
+    render()  # initial 0/total
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {pool.submit(worker, url): url for url in urls}
+            for fut in futures:
+                try:
+                    fut.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("clone worker for %s raised: %s", futures[fut], exc)
+    finally:
+        with lock:
+            state["current"] = ""
+            render(final=True)
+
+    # Map each URL to its deterministic target path so callers get a stable
+    # {url: path|None} contract regardless of completion order.
+    for url in urls:
+        target = os.path.join(dest_dir, _clone_target_dir(url))
+        results[url] = target if os.path.isdir(os.path.join(target, ".git")) else None
+    return results
 
 
 # ---------- Data classes ----------
@@ -422,21 +637,30 @@ class Person:
     last_commit_hash: str | None = None
 
     def __str__(self) -> str:
-        lines = [
-            f"Name:\t\t\t{self.name}",
-            f"Email:\t\t\t{self.email}",
-        ]
+        # Headline: ▶ name <email> [noreply]?
+        header = "  {arrow} {name} {brackets}".format(
+            arrow=_c(LIME, "▶"),
+            name=_c(BOLD + NEON, self.name or "?"),
+            brackets=_email_brackets(self.email),
+        )
+        rows: list[tuple[str, str]] = []
         if self.as_author:
-            lines.append(f"Appears as author:\t{self.as_author} times")
+            rows.append(("author", _c(LIME, f"×{self.as_author}")))
         if self.as_committer:
-            lines.append(f"Appears as committer:\t{self.as_committer} times")
+            rows.append(("committer", _c(LIME, f"×{self.as_committer}")))
         if self.github_login:
+            url = f"https://github.com/{self.github_login}"
+            rows.append(("github", _c(LIME, url) + " " + _tag("verified", LIME)))
+        for alias in self.also_known.values():
+            alias_text = f"{alias.name} {_email_brackets(alias.email)}"
+            rows.append(("alias", alias_text))
+
+        lines = [header]
+        for i, (label, value) in enumerate(rows):
+            branch = "└─" if i == len(rows) - 1 else "├─"
             lines.append(
-                f"Verified account:\n\t\t\thttps://github.com/{self.github_login}"
-            )
-        if self.also_known:
-            lines.append(
-                "Also appears with:" + "".join(f"\n\t\t\t{k}" for k in self.also_known)
+                "      " + _c(GREEN_DIM, branch) + " "
+                + _c(GREEN_DIM, f"{label:<10}") + " " + value
             )
         return "\n".join(lines)
 
@@ -452,8 +676,10 @@ class GitAnalyst:
         self.repos: list[str] = []
         self.same_emails_persons: dict[str, tuple[list[str], set[str]]] = {}
 
-    def append(self, source: str) -> None:
-        if "://" in source:
+    def append(self, source: str, *, cloned_path: str | None = None) -> None:
+        if cloned_path is not None:
+            repo_dir = cloned_path
+        elif "://" in source:
             repo_dir = git_clone(source, self.repos_dir)
             if repo_dir is None:
                 return
@@ -537,34 +763,67 @@ class GitAnalyst:
         }
 
     def __str__(self) -> str:
-        parts: list[str] = [
-            f'Analyze of the git repo(s) "{", ".join(self.repos)}"',
-            "",
-            "Verbose persons info:",
-        ]
-        for _, person in self.sorted_persons:
-            parts.append(DELIMITER)
-            parts.append(str(person))
+        parts: list[str] = []
 
+        # 1. Stats — top-level summary of what was scanned and what was found.
+        parts.extend(_section("stats"))
+        for label, value in (
+            ("repos",   len(self.repos)),
+            ("commits", len(self.commits)),
+            ("persons", len(self.persons)),
+        ):
+            dots = "." * (16 - len(label))
+            parts.append("  " + _c(GREEN_DIM, label) + " "
+                         + _c(GREY, dots) + " " + _c(NEON, str(value)))
+        parts.append("")
+        parts.append("  " + _c(GREEN_DIM, "targets"))
+        for i, repo in enumerate(self.repos):
+            branch = "└─" if i == len(self.repos) - 1 else "├─"
+            parts.append("      " + _c(GREEN_DIM, branch) + " " + _c(NEON, repo))
+
+        # 2. Correlation — shared names with multiple emails + same-person clusters.
         matching: list[str] = []
         for name, emails in self.name_to_emails.items():
-            if len(emails) > 1:
-                emails_block = "\n\t\t\t".join(sorted(emails))
-                matching.append(
-                    f"\n{name} is the owner of emails:\n\t\t\t{emails_block}"
+            if len(emails) <= 1:
+                continue
+            sorted_emails = sorted(emails)
+            block = [
+                "  {bang} {name} {arrow} {n} emails".format(
+                    bang=_c(RED, "[!]"),
+                    name=_c(BOLD + NEON, name),
+                    arrow=_c(GREEN_DIM, "→"),
+                    n=_c(LIME, str(len(sorted_emails))),
                 )
-        if matching:
+            ]
+            for i, e in enumerate(sorted_emails):
+                branch = "└─" if i == len(sorted_emails) - 1 else "├─"
+                block.append("      " + _c(GREEN_DIM, branch) + " "
+                             + _email_with_tag(e))
+            matching.append("\n".join(block))
+
+        same_person: list[str] = []
+        for names, _emails in self.same_emails_persons.values():
+            joined = _c(BOLD + NEON, (" " + _c(GREEN_DIM, "≡") + " ").join(names))
+            same_person.append(
+                "  " + _c(RED, "[!]") + " " + _c(GREEN_DIM, "same person:") + " "
+                + joined
+            )
+
+        if matching or same_person:
+            parts.extend(_section("correlation"))
+            if matching:
+                parts.append("\n\n".join(matching))
+                parts.append("")
+            if same_person:
+                parts.extend(same_person)
+                parts.append("")
+
+        # 3. Identities — per-person breakdown.
+        parts.extend(_section("identities"))
+        for _, person in self.sorted_persons:
+            parts.append(str(person))
             parts.append("")
-            parts.append("Matching info:")
-            parts.append(DELIMITER + "".join(matching))
 
-        for names, _ in self.same_emails_persons.values():
-            parts.append(f"\n{' and '.join(names)} are the same person")
-
-        parts.append("")
-        parts.append("Statistics info:")
-        parts.append(DELIMITER)
-        parts.append(f"Total persons: {len(self.persons)}")
         return "\n".join(parts)
 
 
@@ -601,7 +860,20 @@ def _parse_args() -> argparse.Namespace:
         "--repos-dir", default=DEFAULT_REPOS_DIR,
         help=f"directory to clone remote repositories into (default: {DEFAULT_REPOS_DIR})",
     )
+    parser.add_argument(
+        "--clone-workers", type=int, default=CLONE_WORKERS,
+        help=f"parallel git-clone workers (default: {CLONE_WORKERS})",
+    )
+    parser.add_argument(
+        "--include-forks", action="store_true",
+        help="include forked repositories (default: skipped — forks add upstream "
+             "history that is not the target user's work)",
+    )
     parser.add_argument("--debug", action="store_true", help="print debug information")
+    parser.add_argument(
+        "--no-color", action="store_true",
+        help="disable ANSI colors (also honored via NO_COLOR env var or non-TTY stdout)",
+    )
     return parser.parse_args()
 
 
@@ -616,17 +888,23 @@ def _collect_sources(args: argparse.Namespace) -> list[str]:
     if args.nickname:
         count = get_public_repos_count(args.nickname)
         if count:
-            print(f"found {count} repos")
-            sources.extend(get_github_repos(args.nickname, repos_count=count))
+            logger.info("found %d public repos for %s", count, args.nickname)
+            sources.extend(get_github_repos(
+                args.nickname, repos_count=count,
+                include_forks=args.include_forks,
+            ))
     return sources
 
 
 def main() -> None:
     args = _parse_args()
+    _setup_colors(force_off=args.no_color)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
-        format="-" * 40 + "\n%(levelname)s: %(message)s",
+        format=_c(GREEN_DIM, "[*] ") + _c(LIME, "%(levelname)s") + " %(message)s",
     )
+
+    print(_c(NEON, BANNER), flush=True)
 
     if args.search:
         token = os.environ.get("GITHUB_TOKEN")
@@ -645,10 +923,33 @@ def main() -> None:
         return
 
     analyst = GitAnalyst(repos_dir=args.repos_dir)
-    for source in sources:
-        analyst.append(source)
 
-    logger.info("Resolving GitHub usernames, please wait...")
+    url_sources = [s for s in sources if "://" in s]
+    local_sources = [s for s in sources if "://" not in s]
+
+    cloned: dict[str, str | None] = {}
+    if url_sources:
+        logger.info(
+            "cloning %d repo(s) into %s with %d workers",
+            len(url_sources), args.repos_dir, args.clone_workers,
+        )
+        cloned = clone_many(url_sources, args.repos_dir, workers=args.clone_workers)
+        failed = [u for u, p in cloned.items() if p is None]
+        if failed:
+            logger.warning("%d clone(s) failed (see --debug for reasons)", len(failed))
+
+    to_analyze = len(local_sources) + sum(1 for p in cloned.values() if p)
+    if to_analyze:
+        logger.info("analyzing %d repo(s)...", to_analyze)
+    for src in local_sources:
+        analyst.append(src)
+    for url, path in cloned.items():
+        if path:
+            analyst.append(url, cloned_path=path)
+
+    if analyst.persons:
+        logger.info("resolving GitHub usernames for %d identities...",
+                    len(analyst.persons))
     analyst.resolve_persons()
 
     if analyst.repos:
