@@ -1,7 +1,7 @@
 # Gitcolombo
 
 <p align="center">
-  <img src="https://telegra.ph/file/0730b125282266989e861.png" alt="Gitcolombo" width="320">
+  <img src="https://github.com/user-attachments/assets/a464d5ab-93ce-4413-9c3a-ae5f2209fbd9" alt="Gitcolombo" width="320">
 </p>
 
 OSINT tool that extracts identities — names, emails, and links between
